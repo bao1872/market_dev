@@ -102,7 +102,10 @@ def test_canonical_mode_reads_mdas_directly(monkeypatch):
         SimpleNamespace(source_mode='canonical', as_of='2026-08-17', max_symbols=80), None)
     assert not sentinel, 'canonical build must not use the Parquet export loader'
     assert 'SH:600000' in out_frames
-    assert 'adj_factor' not in out_frames['SH:600000'].columns
+    # STALE_TEST: the native 14-task path retains the authoritative factor
+    # alongside MDAS QFQ/raw bars for decision-local PIT reconstruction.
+    assert out_frames['SH:600000'] is pit['SH:600000']
+    assert 'adj_factor' in out_frames['SH:600000'].columns
     assert 'adj_factor' in pit['SH:600000'].columns
     assert report['adjustment_mode'] == 'CANONICAL_MDAS_QFQ'
     assert report['factor_provenance_authoritative'] is True
@@ -114,55 +117,28 @@ def _raise():
     raise AssertionError('Parquet export loader must not be called')
 
 
-def test_admin_publish_unifies_with_worker_path(monkeypatch):
-    # Req 1: the admin publish path must produce the SAME complete, file-verified
-    # active release record the worker uses, and must swap the snapshot pointer
-    # atomically (model pointer + snapshot pointer can never diverge).
+def test_admin_publish_rejects_legacy_model_even_if_historically_audited(monkeypatch, tmp_path):
+    """STALE_TEST: old pickle activation is retired; historical reads remain covered below."""
     from app.api.admin_strategy_integration import router
     from app.services.access_control_service import AccessContext, require_admin
-    from app.strategy_integration import db_export
-
-    src_batch = Path('/tmp/panji_14_snapshot/2026-08-17_89a5be0b28d1dac9')
-    if not src_batch.is_dir():
-        pytest.skip('historical 14-stock batch not present')
-    root = Path(tempfile.mkdtemp(prefix='panji_publish_'))
-    batch = root / src_batch.name
-    shutil.copytree(src_batch, batch)
-    manifest = json.loads((batch / 'manifest.json').read_text())
-    manifest['status'] = 'AUDITED'
-    (batch / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
-    release_id = manifest['release_id']
-    eval_sha = manifest['evaluation_sha256']
-
-    monkeypatch.setenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED', '1')
-    monkeypatch.setenv('PANJI_STRATEGY_RELEASE_ROOT', str(root))
-    # Guard the only DB-touching call; the canonical path is not exercised here.
-    monkeypatch.setattr(db_export, 'read_official_qfq_stock_batch',
-                        lambda *a, **k: ({}, {}))
-
+    # Deliberately invalid legacy publication input: reject before touching pointers.
+    root = tmp_path/'releases'
+    batch = root/'legacy'
+    release_id, eval_sha = 'a'*64, 'b'*64
+    release_store.atomic_json(batch/'manifest.json', dict(status='AUDITED',release_id=release_id,
+        evaluation_sha256=eval_sha,bundle_path=str(tmp_path/'old.pkl'),runtime={'bundle_sha256':'c'*64}))
+    monkeypatch.setenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED','1')
+    monkeypatch.setenv('PANJI_STRATEGY_RELEASE_ROOT',str(root))
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[require_admin] = lambda: AccessContext(
-        user_id='test', account_status='active', roles=['admin'], is_admin=True,
-        is_member=False, subscription_active=True, default_route='/admin',
-        capabilities={'strategy_research': {'active': True}})
-    client = TestClient(app)
-    resp = client.post(
-        f'/v1/admin/strategy-research/zigzag/model-releases/{release_id}/publish',
-        json={'release_id': release_id, 'candidate_report_sha256': eval_sha})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()['status'] == 'RELEASE_ACTIVATED'
-
-    # Snapshot pointer (current) and model pointer (active_release.json) agree.
-    current = root / 'current'
-    assert current.is_symlink() and Path(current).resolve() == batch.resolve()
-    active = json.loads((root / 'active_release.json').read_text())
-    assert active['release_id'] == release_id
-    assert active['schema'] == 'panji-strategy-active-release-v1'
-    assert active['bundle_path'] == manifest['bundle_path']
-    assert active['bundle_sha256'] == manifest['runtime']['bundle_sha256']
-    assert active['batch'] == str(batch.resolve())
-    assert Path(active['bundle_path']).is_file()
+        user_id='test',account_status='active',roles=['admin'],is_admin=True,
+        is_member=False,subscription_active=True,default_route='/admin',capabilities={'strategy_research':{'active':True}})
+    response = TestClient(app).post(f'/v1/admin/strategy-research/zigzag/model-releases/{release_id}/publish',
+        json={'release_id':release_id,'candidate_report_sha256':eval_sha})
+    assert response.status_code == 409
+    assert 'PRODUCTION_FOURTEEN_PACKAGE_REQUIRED' in response.json()['detail']
+    assert not (root/'active_release.json').exists()
 
 
 _SRC_BATCH = Path('/tmp/panji_14_snapshot/2026-08-17_89a5be0b28d1dac9')

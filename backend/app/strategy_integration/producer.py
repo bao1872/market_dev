@@ -6,18 +6,16 @@ operator-authorized deployment must enable batch publication to live readers.
 """
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from datetime import date, datetime, timezone
 import hashlib
 import json
-import math
-from pathlib import Path
+from collections import Counter, defaultdict
+from datetime import UTC, date, datetime
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from . import model
+from .evaluation_contract import EVALUATION_PROTOCOL, MATURITY_CONTRACT, PATH_HORIZON, signal_period
 
 CONTRACT = 'L_HH__H_LL__V1'
 # Price input contract for the release identity. The frozen bundle itself was
@@ -25,7 +23,7 @@ CONTRACT = 'L_HH__H_LL__V1'
 # so the release identity is versioned QFQ_ASOF_V1 and the original model SHA is
 # retained separately as model.BUNDLE_SHA / bundle_sha256.
 PRICE_INPUT_CONTRACT = 'QFQ_ASOF_V1'
-EVAL_HORIZON = 20
+EVAL_HORIZON = PATH_HORIZON
 RELEASE_ID = hashlib.sha256(f'{model.BUNDLE_SHA}|{model.ENGINE_SHA}|{CONTRACT}|{PRICE_INPUT_CONTRACT}'.encode()).hexdigest()
 
 def release_id_for(bundle_sha: str, price_contract: str = PRICE_INPUT_CONTRACT) -> str:
@@ -144,17 +142,14 @@ def _candidate_and_bars(raw: pd.DataFrame, symbol: str, fmod: Any, bundle: dict,
     return {'bars': bars, 'candidates': candidates}, daily
 
 
-def _outcome(raw: pd.DataFrame, final: list, j: int, kind: str, t: int,
-             horizon: int = EVAL_HORIZON) -> str:
+def _outcome(raw: pd.DataFrame, final: list, j: int, kind: str, t: int) -> str:
     """All candidate alerts, including false anchors, kept in the denominator.
 
-    Label is known only when the next true structure/negation has matured within
-    the fixed observation horizon, never used as a prediction feature.
+    Label is known only when the next true structure/negation is confirmed in
+    the supplied as-of history. Its maturity is independent of the return horizon.
     """
-    if t + horizon >= len(raw):
-        return 'UNRESOLVED'
     true_idx = next((i for i, p in enumerate(final) if p['bar'] == j and p['type'] == kind), None)
-    last_bar = t + horizon
+    last_bar = len(raw)-1
     if true_idx is None:
         negating = [p for p in final if p['bar'] > j and p['type'] != kind
                     and p['confirmed_at'] <= last_bar]
@@ -213,7 +208,7 @@ def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict],
                     *, as_of: str, source_sha: str, release_id: str = RELEASE_ID,
                     price_adjustment: str = 'qfq',
                     adjustment_mode: str | None = None,
-                    bundle_sha256: str = '') -> dict:
+                    bundle_sha256: str = '', split_windows: dict | None = None) -> dict:
     models = [{'id': f'joint_d{k}_{side.lower()}', 'name': f'{side} D{k} 联合', 'side': side}
               for side in ('BUY','SELL') for k in (1,2,3)]
     events = []
@@ -238,8 +233,11 @@ def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict],
                           'side': side, 'signal_time': o['decision_date'], 'outcome': outcome,
                           'candidate_id': candidate['candidate_id'], 'observation_id': o['observation_id'],
                           'stage': o['stage'], 'decision_date': o['decision_date'],
-                          'model_release_id': release_id}
-                if outcome != 'UNRESOLVED':
+                          'model_release_id': release_id,
+                          'structure_outcome': outcome,
+                          'trend_at_event': (o.get('segment') or {}).get('direction'),
+                          'path_status': 'MATURED' if t+EVAL_HORIZON < len(raw) else 'UNRESOLVED'}
+                if record['path_status'] == 'MATURED':
                     record.update(_path_metrics(raw, kind, t))
                 events.append(record)
     if any(o.get('breakout') for stock in stocks.values() for c in stock['candidates'] for o in c['observations']):
@@ -256,25 +254,31 @@ def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict],
                     fact = o.get('breakout')
                     if not fact or not o['first_breakout']:
                         continue
-                    trend = (fact.get('trend_at_breakout') or {}).get('direction')
-                    group = 'up' if trend == '向上' else 'down' if trend == '向下' else 'unknown'
+                    breakout_trend = (fact.get('trend_at_breakout') or {}).get('direction')
+                    group = 'up' if breakout_trend == '向上' else 'down' if breakout_trend == '向下' else 'unknown'
                     side = 'BUY' if candidate['kind'] == 'L' else 'SELL'
                     t = idx[o['decision_date']]
                     record = {'event_id': fact['event_id'], 'model_id': f'breakout_{group}_{side.lower()}',
                         'family': 'BREAKOUT', 'side': side, 'symbol': symbol, 'signal_time': o['decision_date'],
                         'candidate_id': candidate['candidate_id'], 'observation_id': o['observation_id'],
                         'stage': o['stage'], 'decision_date': o['decision_date'], 'model_release_id': release_id,
-                        'trend_at_event': trend, 'outcome': 'UNRESOLVED',
-                        'outcome_definition': 'DIRECTIONAL_ENDPOINT_POSITIVE_NEXT_OPEN_20B'}
+                        'trend_at_event': breakout_trend, 'outcome': 'UNRESOLVED',
+                        'outcome_definition': 'DIRECTIONAL_ENDPOINT_POSITIVE_NEXT_OPEN_20B',
+                        'structure_outcome': 'NOT_APPLICABLE',
+                        'path_status': 'MATURED' if t+EVAL_HORIZON < len(raw) else 'UNRESOLVED'}
                     if t + EVAL_HORIZON < len(raw):
                         metrics = _path_metrics(raw, candidate['kind'], t)
                         record.update(metrics)
                         record['outcome'] = 'SUCCESS' if metrics['endpoint_pct'] > 0 else 'FAIL'
                     events.append(record)
+    for record in events:
+        record['period'] = signal_period(record['signal_time'], split_windows)
     return {'schema': 'panji-strategy-evaluation-v1',
             'metadata': {'strategy_key': 'zigzag_two_stage', 'strategy_name': '两层 ZigZag 结构机会',
                          'version': release_id[:16], 'generated_at': as_of,
-                         'evaluation_protocol': f'ALL_ALERTS_NEXT_OPEN_{EVAL_HORIZON}B_H_LL_L_HH_V1',
+                         'evaluation_protocol': EVALUATION_PROTOCOL,
+                         'maturity_contract': MATURITY_CONTRACT,
+                         'path_horizon': EVAL_HORIZON, 'split_windows':split_windows,
                          'model_sha256': bundle_sha256 or model.BUNDLE_SHA,
                          'data_sha256': source_sha,
                          'audit_ref': f'candidate_full_cohort_{release_id[:16]}',
@@ -314,10 +318,10 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
         days.append(as_of)
     batches = [{'trade_date': day, 'release_id': release_id, 'status': 'PUBLISHED',
                 'items': by_date.get(day, [])} for day in sorted(set(days))]
-    candidate = {'schema': 'panji-strategy-candidates-v2',
+    candidate: dict[str, Any] = {'schema': 'panji-strategy-candidates-v2',
                  'metadata': {'strategy_id':'zigzag_two_stage', 'release_id':release_id,
                               'feature_sha':model.ENGINE_SHA, 'audit_ref':f'{source_sha[:16]}_{CONTRACT}',
-                              'generated_at':datetime.now(timezone.utc).isoformat(), 'status':'AUDITED',
+                              'generated_at':datetime.now(UTC).isoformat(), 'status':'AUDITED',
                               'score_calibrated':False, 'price_adjustment':price_adjustment,
                               'adjustment_mode':adjustment_mode,
                               'model_sha256': bundle_sha256 or model.BUNDLE_SHA,
@@ -329,7 +333,8 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
     evaluation = make_evaluation(stock_raw, stocks, fmod, as_of=as_of, source_sha=source_sha,
                                   release_id=release_id, price_adjustment=price_adjustment,
                                   adjustment_mode=adjustment_mode,
-                                  bundle_sha256=bundle_sha256)
+                                  bundle_sha256=bundle_sha256,
+                                  split_windows=bundle['fourteen_runtime'].manifest.get('split_windows') if 'fourteen_runtime' in bundle else None)
     if 'fourteen_runtime' in bundle:
         from .fourteen_adapter import SCHEMA, task_samples
         candidate['schema'] = SCHEMA

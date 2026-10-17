@@ -9,10 +9,11 @@ implements or re-applies an adjustment factor, so the export cannot silently be
 raw bars with a "qfq" label.
 """
 from __future__ import annotations
+
 import argparse
 import asyncio
-from datetime import date
 import json
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,7 @@ from sqlalchemy import select
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
+
 from .canonical_strategy_bars import load_official_qfq_stock_batch
 from .producer import ProducerError
 
@@ -41,10 +43,12 @@ async def read_official_qfq_stock_batch(
     export and the in-place canonical source mode; keep all MDAS access here so
     the canonical mode never re-implements or re-applies an adjustment factor.
     """
-    from .readonly_runtime import configure_readonly_connections, assert_readonly_session
+    from .readonly_runtime import assert_readonly_session, configure_readonly_connections
     configure_readonly_connections()
     async with AsyncSessionLocal() as db:
         readonly_verified = await assert_readonly_session(db)
+        if not readonly_verified:
+            raise ProducerError('STRATEGY_DATABASE_READ_ONLY_PROOF_REQUIRED')
         if max_symbols < 0:
             raise ProducerError('NEGATIVE_SYMBOL_LIMIT')
         statement = select(Instrument.id, Instrument.symbol, Instrument.market).where(
@@ -111,6 +115,9 @@ async def export_dataset(output: Path, as_of: date, *, batch_size: int = 80) -> 
         'coverage_ratio_of_eligible': report['coverage_ratio_of_eligible'],
         'coverage_ratio_of_total': report['coverage_ratio_of_total'],
         'excluded': report['excluded'],
+        'excluded_symbols': report.get('excluded_symbols', {}),
+        'stale_symbols': report.get('stale_symbols', []),
+        'expected_symbols': report.get('expected_symbols', []),
         'provenance': report['provenance'],
         'rows': int(len(all_bars)),
         'factor_provenance_authoritative': True,

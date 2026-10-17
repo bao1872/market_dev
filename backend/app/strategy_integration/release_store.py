@@ -60,7 +60,7 @@ def digest_path(p: Path) -> str:
     return h.hexdigest()
 
 
-def resolve_release_batch(root: Path, release_id: str) -> Path | None:
+def resolve_release_batch(root: Path, release_id: str, *, evaluation_sha256: str | None = None) -> Path | None:
     """Locate the immutable batch directory carrying ``release_id`` under ``root``.
 
     Build names the batch ``<as_of>_<release_id[:16]>`` while the operator-facing
@@ -79,7 +79,7 @@ def resolve_release_batch(root: Path, release_id: str) -> Path | None:
             m = json.loads(manifest.read_text())
         except Exception:
             continue
-        if m.get('release_id') == release_id:
+        if m.get('release_id') == release_id and (evaluation_sha256 is None or m.get('evaluation_sha256') == evaluation_sha256):
             matches.append((m.get('as_of', ''), child.name, child))
     return max(matches)[2] if matches else None
 
@@ -100,7 +100,8 @@ def _validate_batch_for_activation(batch: Path):
     from app.services.strategy_research_read_service import _check_snapshot
 
     descriptor = json.loads((batch / 'candidate_snapshot.json').read_bytes())
-    from app.services.strategy_partitioned_snapshot import SCHEMA as PARTITIONED, index, validate_publication
+    from app.services.strategy_partitioned_snapshot import SCHEMA as PARTITIONED
+    from app.services.strategy_partitioned_snapshot import index, validate_publication
     if isinstance(descriptor, dict) and descriptor.get('schema') == PARTITIONED:
         try:
             candidate = index(batch/'candidate_snapshot.json')
@@ -153,13 +154,18 @@ def write_active_release(root: Path, batch: Path, release_id: str,
             raise PublishError('ACTIVE_RELEASE_BUNDLE_FILE_MISSING ' + str(bp))
         if bp.is_file() and bundle_sha256 and digest_path(bp) != bundle_sha256:
             raise PublishError('ACTIVE_RELEASE_BUNDLE_SHA_MISMATCH ' + str(bp))
+    previous = resolve_active_release(root)
+    now = datetime.now(UTC).isoformat()
+    same_weights = previous and previous.get('release_id') == release_id and previous.get('bundle_sha256') == bundle_sha256
+    model_activated_at = previous.get('model_activated_at', previous['activated_at']) if previous and same_weights else now
     payload = {
         'schema': 'panji-strategy-active-release-v1',
         'release_id': release_id,
         'batch': str(batch),
         'bundle_sha256': bundle_sha256,
         'bundle_path': bundle_path,
-        'activated_at': datetime.now(UTC).isoformat(),
+        'activated_at': now,
+        'model_activated_at': model_activated_at,
     }
     target = root / ACTIVE_RELEASE
     atomic_json(target, payload)
@@ -175,6 +181,26 @@ def resolve_active_release(root: Path) -> dict | None:
 
 
 def activate_batch(root: Path, batch: Path, *, bundle_sha256: str = '',
+                   bundle_path: str = '', refresh_only: bool = False):
+    """Serialize publication; daily refresh cannot replace weights or roll dates backward."""
+    import fcntl
+    root = root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    with (root/'publication.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if refresh_only:
+            active = resolve_active_release(root)
+            manifest = json.loads((batch/'manifest.json').read_text())
+            if (not active or active['release_id'] != manifest['release_id']
+                    or active['bundle_sha256'] != manifest.get('runtime', {}).get('bundle_sha256')):
+                raise PublishError('DAILY_REFRESH_MODEL_CHANGED')
+            prior = json.loads((Path(active['batch'])/'manifest.json').read_text())
+            if manifest['as_of'] < prior['as_of']:
+                return {'status': 'HISTORY_VALIDATED_NOT_PUBLISHED', 'batch': str(batch)}
+        return _activate_batch_locked(root, batch, bundle_sha256=bundle_sha256, bundle_path=bundle_path)
+
+
+def _activate_batch_locked(root: Path, batch: Path, *, bundle_sha256: str = '',
                    bundle_path: str = ''):
     """Validate one immutable batch, then atomically move the pointer to it.
 

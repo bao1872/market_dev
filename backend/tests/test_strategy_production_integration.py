@@ -116,10 +116,11 @@ def _stub_weights(dest: Path, tau: float) -> str:
 def test_worker_predict_uses_canonical_mdas_entrance(monkeypatch, tmp_path):
     """Defect 1: the worker must not silently fall back to the offline parquet."""
     jobs = tmp_path / 'jobs'
-    (jobs / 'queue').mkdir(parents=True)
-    (jobs / 'queue' / 'j1.json').write_text(json.dumps(
-        {'job_id': 'j1', 'kind': 'PREDICT', 'status': 'QUEUED',
-         'payload': {'trade_date': '2026-08-17'}}))
+    # INVALID_FIXTURE / STALE_TEST: use the durable owner and current runner.
+    from app.strategy_integration.job_store import enqueue
+    enqueue(jobs, 'PREDICT', {'trade_date':'2026-08-17', 'release_id':'a'*64, 'bundle_sha256':'b'*64})
+    monkeypatch.setattr('app.strategy_integration.release_store.resolve_active_release',
+                        lambda root: {'release_id':'a'*64, 'bundle_sha256':'b'*64})
     monkeypatch.setenv('PANJI_STRATEGY_WORKER_ENABLED', '1')
     monkeypatch.setenv('PANJI_STRATEGY_JOB_ROOT', str(jobs))
     monkeypatch.setenv('PANJI_STRATEGY_SNAPSHOT_ROOT', str(tmp_path / 'snap'))
@@ -128,16 +129,11 @@ def test_worker_predict_uses_canonical_mdas_entrance(monkeypatch, tmp_path):
 
     captured = {}
 
-    class _R:
-        returncode = 0
-        stdout = '{}'
-        stderr = ''
-
-    def fake_run(cmd, **_kw):
+    def fake_run(cmd, *args, **kwargs):
         captured['cmd'] = cmd
-        return _R()
+        return 0, 'no result'
 
-    monkeypatch.setattr(worker.subprocess, 'run', fake_run)
+    monkeypatch.setattr(worker, '_run_with_progress', fake_run)
     worker.process_one()
     cmd = captured['cmd']
     assert '--source-mode' in cmd, cmd

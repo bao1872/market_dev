@@ -1,14 +1,9 @@
 /** Admin control plane: the server owns rolling split dates and task readiness. */
 import { apiClient } from './client'
 
-export type DateWindow = { start: string; end: string }
-export type TrainConfig = { model_family?: 'fourteen'; as_of:string; train: DateWindow; val: DateWindow; test: DateWindow; trees: number }
-export type TrainWindows = TrainConfig & {
-  status: 'AUTHORITATIVE_ROLLING_24_6_3'
-  train_enqueue_enabled: boolean
-}
 export interface ModelRelease {
   as_of?: string
+  production_eligible?: boolean
   evaluation_sha256?: string
   validation?: Record<string, number>
   release_id: string | null
@@ -22,20 +17,8 @@ export interface ReleaseList {
   active_release: { release_id: string; activated_at: string } | null
   releases: ModelRelease[]
 }
-export async function getTrainingWindows():Promise<TrainWindows> {
-  const {data}=await apiClient.get<TrainWindows>('/v1/admin/strategy-research/zigzag/train/windows')
-  return data
-}
 export async function listModelReleases(): Promise<ReleaseList> {
   const {data} = await apiClient.get<ReleaseList>('/v1/admin/strategy-research/zigzag/model-releases')
-  return data
-}
-export async function previewTraining(config: TrainConfig): Promise<{valid:boolean;status:string;message:string}> {
-  const {data} = await apiClient.post('/v1/admin/strategy-research/zigzag/train/preview',config)
-  return data
-}
-export async function queueTraining(config: TrainConfig): Promise<{job_id:string;status:string}> {
-  const {data} = await apiClient.post('/v1/admin/strategy-research/zigzag/train-runs',config)
   return data
 }
 export async function requestPrediction(trade_date: string): Promise<{job_id:string;status:string}> {
@@ -62,15 +45,31 @@ export async function getStrategyJobs(): Promise<{status:string;items:StrategyJo
 export async function retryStrategyJob(jobId:string):Promise<{job_id:string;status:string}> {
   const {data}=await apiClient.post(`/v1/admin/strategy-research/zigzag/jobs/${encodeURIComponent(jobId)}/retry`);return data
 }
-export async function getStrategyRuntime():Promise<{status:string;can_train:boolean;can_predict:boolean}> {
+export async function getStrategyRuntime():Promise<{status:string;can_train:boolean;can_predict:boolean;can_validate_delivery?:boolean;after_close?:{status:string;checked_at?:string;error?:string;reason?:string;backlog_exceeds_31_sessions?:boolean}}> {
   const {data}=await apiClient.get('/v1/admin/strategy-research/zigzag/runtime');return data
-}
-export async function evaluateTraining(jobId:string,trade_date:string):Promise<{job_id:string;status:string}> {
-  const {data}=await apiClient.post(`/v1/admin/strategy-research/zigzag/train-runs/${encodeURIComponent(jobId)}/evaluate`,{trade_date});return data
 }
 export async function readTrainingReport(jobId:string):Promise<{status:string;model_count:number;metrics:Record<string,Record<string,{n:number;precision:number|null;recall:number|null;auc:number|null}>>}> {
   const {data}=await apiClient.get(`/v1/admin/strategy-research/zigzag/train-runs/${encodeURIComponent(jobId)}/report`);return data
 }
 export async function auditModelRelease(releaseId:string,sha:string):Promise<{status:string}> {
   const {data}=await apiClient.post(`/v1/admin/strategy-research/zigzag/model-releases/${encodeURIComponent(releaseId)}/audit`,{release_id:releaseId,candidate_report_sha256:sha});return data
+}
+
+export async function receiveLabDelivery(file:File, manifestSha:string, tradeDate:string):Promise<{job_id:string;status:string;delivery_id:string}> {
+  const chunkSize=512*1024
+  if(file.size<1 || file.size>128*1024*1024)throw new Error('交付包须为 1 字节至 128 MiB')
+  const count=Math.ceil(file.size/chunkSize)
+  let result:{job_id:string;status:string;delivery_id:string}|undefined
+  for(let index=0;index<count;index++){
+    const body=new FormData()
+    body.append('file',file.slice(index*chunkSize,(index+1)*chunkSize),file.name)
+    body.append('manifest_sha256',manifestSha)
+    body.append('trade_date',tradeDate)
+    body.append('chunk_index',String(index))
+    body.append('total_bytes',String(file.size))
+    const {data}=await apiClient.post('/v1/admin/strategy-research/zigzag/deliveries/chunks',body,{headers:{'Content-Type':undefined},timeout:120000})
+    if(index===count-1)result=data
+  }
+  if(!result?.job_id)throw new Error('交付未完整接收，未登记评价任务')
+  return result
 }

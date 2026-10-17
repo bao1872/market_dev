@@ -5,21 +5,20 @@ A separate disabled-by-default worker owns execution after deployment approval.
 No DB migrations or extra permissions are introduced.
 """
 from __future__ import annotations
-from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
-import hashlib
+
 import json
 import os
-from pathlib import Path
 import re
-import uuid
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, model_validator
+
 from app.services.access_control_service import AccessContext, require_admin
-from app.strategy_integration.release_store import activate_batch, resolve_release_batch
 from app.strategy_integration import rolling_windows as rw
+from app.strategy_integration.release_store import activate_batch, resolve_release_batch
 
 router=APIRouter(prefix='/v1/admin/strategy-research/zigzag', tags=['strategy-research-admin'])
 SHA_RE=re.compile(r'^[0-9a-f]{64}$')
@@ -38,21 +37,26 @@ def _job_root() -> Path:
     return Path(root)
 
 
-def _train_enqueue_ready() -> bool:
-    from app.strategy_integration.runtime_status import read_runtime_status
-    root = os.getenv('PANJI_STRATEGY_JOB_ROOT', '')
-    return bool(root and os.getenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED') == '1' and os.getenv('PANJI_STRATEGY_TRAIN_RUNTIME_READY') == '1' and read_runtime_status(root).get('can_train'))
-
-
 def _save_job(kind:str,payload:dict[str,Any], *, retry_of=None) -> dict[str,Any]:
     _require_write_enabled()
-    if kind == 'TRAIN' and not _train_enqueue_ready():
-        raise HTTPException(status_code=503,detail='独立训练运行时尚未核验，禁止创建训练任务')
+    if kind == 'TRAIN':
+        raise HTTPException(status_code=410, detail='训练已迁至 panji_lab；现有任务与报告保留')
     if kind in ('PREDICT', 'EVALUATE'):
         from app.strategy_integration.runtime_status import read_runtime_status
-        capability = 'can_predict' if kind == 'PREDICT' else 'can_train'
+        capability = 'can_predict' if kind == 'PREDICT' else 'can_validate_delivery'
         if not read_runtime_status(_job_root()).get(capability):
             raise HTTPException(status_code=503, detail='策略执行运行时或模型尚未就绪')
+    if kind == 'PREDICT':
+        from app.strategy_integration.producer import EVALUATION_PROTOCOL
+        from app.strategy_integration.release_store import resolve_active_release
+        release_root = os.getenv('PANJI_STRATEGY_RELEASE_ROOT', '')
+        if not release_root or not Path(release_root).is_absolute():
+            raise HTTPException(status_code=503, detail='release root not configured')
+        active = resolve_active_release(Path(release_root))
+        if not active:
+            raise HTTPException(status_code=409, detail='尚无批准的正式模型')
+        payload = {**payload, **{k:active[k] for k in ('release_id','bundle_sha256')},
+                   'evaluation_protocol': EVALUATION_PROTOCOL}
     from app.strategy_integration.job_store import enqueue
     try:
         return enqueue(_job_root(), kind, payload, retry_of=retry_of)
@@ -103,28 +107,12 @@ class PublishRequest(BaseModel):
 
 @router.get('/train/windows')
 def training_windows(ctx:AccessContext=Depends(require_admin)) -> dict:
-    today=datetime.now(ZoneInfo('Asia/Shanghai')).date()
-    w=rw.rolling_windows(today)
-    return {
-        'as_of':today.isoformat(),
-        'train':{'start':w['windows']['train'][0],'end':w['windows']['train'][1]},
-        'val':{'start':w['windows']['val'][0],'end':w['windows']['val'][1]},
-        'test':{'start':w['windows']['test'][0],'end':w['windows']['test'][1]},
-        'trees':300,
-        'model_family':'fourteen',
-        'model_count':14,
-        'global_only':True,
-        'status':'AUTHORITATIVE_ROLLING_24_6_3',
-        'train_enqueue_enabled': _train_enqueue_ready(),
-    }
+    raise HTTPException(status_code=410, detail='训练窗口管理已迁至 panji_lab')
 
 
 @router.post('/train/preview')
 def preview_training(request:TrainWindow,ctx:AccessContext=Depends(require_admin)) -> dict:
-    return {'valid':False,'split_by':'candidate_d1_decision_date',
-            'maturity_checked_at':None, 'label_contract':{'L':'HH','H':'LL'},
-            'status':'SCHEMA_PREVIEW_ONLY',
-            'message':'仅完成日期合同预检；样本成熟度/数量/PIT 尚未检查，必须由隔离训练链验证'}
+    raise HTTPException(status_code=410, detail='训练配置与预检已迁至 panji_lab')
 
 
 @router.post('/train-runs',status_code=202)
@@ -139,7 +127,8 @@ def request_prediction(request:PredictionRequest,ctx:AccessContext=Depends(requi
 
 @router.get('/train-runs/{job_id}')
 def job_status(job_id:str,ctx:AccessContext=Depends(require_admin)) -> dict:
-    if not re.fullmatch('[0-9a-f]{32}',job_id):raise HTTPException(status_code=422,detail='invalid job')
+    if not re.fullmatch('[0-9a-f]{32}',job_id):
+        raise HTTPException(status_code=422,detail='invalid job')
     from app.strategy_integration.job_store import read_job
     job = read_job(_job_root(), job_id)
     if job is None:
@@ -178,11 +167,23 @@ def model_releases(ctx:AccessContext=Depends(require_admin)) -> dict:
     records=[]
     seen = set()
     candidates = list(root.glob('*/manifest.json')) + list(root.glob('releases/*/manifest.json'))
-    for p in sorted(candidates, key=lambda p: p.stat().st_mtime_ns, reverse=True)[:50]:
+    for p in sorted(candidates, key=lambda p: p.stat().st_mtime_ns, reverse=True):
         m = json.loads(p.read_text())
+        # Daily snapshots are result batches, not competing model releases.
+        if m.get('bundle_origin') != 'PANJI_LAB_DELIVERY' and m.get('status') != 'AUDITED':
+            continue
         if SHA_RE.fullmatch(m.get('release_id', '')) and m['release_id'] not in seen:
-            records.append({k:m.get(k) for k in ('release_id','label_contract','status','as_of','evaluation_sha256','validation')})
+            records.append({**{k:m.get(k) for k in ('release_id','label_contract','status','as_of','evaluation_sha256','validation')},
+                            'bundle_sha256':m.get('runtime', {}).get('bundle_sha256')})
+            from app.strategy_integration.fourteen_adapter import verify_production_package
+            try:
+                verify_production_package(m.get('bundle_path') or '.', m.get('runtime', {}).get('bundle_sha256'))
+                records[-1]['production_eligible'] = True
+            except (ValueError, OSError, KeyError):
+                records[-1]['production_eligible'] = False
             seen.add(m['release_id'])
+            if len(records) >= 20:
+                break
     active=root/'active_release.json'
     return {'releases':records,'active_release':json.loads(active.read_text()) if active.is_file() else None}
 
@@ -235,14 +236,17 @@ def publish_release(release_id:str,request:PublishRequest,ctx:AccessContext=Depe
     # releases/<release_id>/, while a freshly built batch is named
     # <as_of>_<release_id[:16]>. Either way, activate_batch points the snapshot
     # pointer + the model record at the SAME batch, atomically.
-    batch_dir = Path(root)/'releases'/release_id
-    if not (batch_dir/'manifest.json').is_file():
-        batch_dir = resolve_release_batch(Path(root), release_id)
+    batch_dir = resolve_release_batch(Path(root), release_id, evaluation_sha256=request.candidate_report_sha256)
     if batch_dir is None or not (batch_dir/'manifest.json').is_file():
         raise HTTPException(status_code=404,detail='candidate release unavailable')
     manifest = json.loads((batch_dir/'manifest.json').read_text())
     if manifest.get('status')!='AUDITED' or manifest.get('release_id')!=release_id or manifest.get('evaluation_sha256')!=request.candidate_report_sha256:
         raise HTTPException(status_code=409,detail='independent evaluation audit prerequisite missing')
+    from app.strategy_integration.fourteen_adapter import verify_production_package
+    try:
+        verify_production_package(manifest.get('bundle_path') or '.', manifest.get('runtime', {}).get('bundle_sha256'))
+    except (OSError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     # One atomic pointer swap + complete, file-verified active release record.
     # This is the exact path the worker uses, so the admin publish can never leave
     # the model pointer (bundle_path/bundle_sha256) and the snapshot pointer
@@ -299,20 +303,71 @@ def audit_release(release_id: str, request: PublishRequest, ctx:AccessContext=De
     root = Path(os.getenv('PANJI_STRATEGY_RELEASE_ROOT', ''))
     if not root.is_absolute():
         raise HTTPException(status_code=503, detail='release root not configured')
-    batch = resolve_release_batch(root, release_id)
+    batch = resolve_release_batch(root, release_id, evaluation_sha256=request.candidate_report_sha256)
     if batch is None:
         raise HTTPException(status_code=404, detail='candidate release unavailable')
-    from app.strategy_integration.release_store import _validate_batch_for_activation, atomic_json, digest_path, PublishError
+    from app.strategy_integration.release_store import (
+        PublishError,
+        _validate_batch_for_activation,
+        atomic_json,
+        digest_path,
+    )
     manifest = json.loads((batch/'manifest.json').read_text())
     if manifest.get('status') not in ('VALIDATED_STAGING_NOT_DEPLOYED', 'AUDITED') or request.candidate_report_sha256 != manifest.get('evaluation_sha256'):
         raise HTTPException(status_code=409, detail='评价资产身份或校验状态不符')
+    from app.strategy_integration.producer import EVALUATION_PROTOCOL
+    proof = manifest.get('runtime', {}).get('lab_delivery', {})
+    if (manifest.get('evaluation_protocol') != EVALUATION_PROTOCOL
+            or proof.get('status') != 'GOLDEN_VERIFIED'
+            or proof.get('manifest_sha256') != manifest.get('runtime', {}).get('bundle_sha256')):
+        raise HTTPException(status_code=409, detail='须先完成 lab 正式交付、黄金样例对账与独立成熟评价')
     if digest_path(batch/'evaluation_snapshot.json') != request.candidate_report_sha256:
         raise HTTPException(status_code=409, detail='评价资产已变更')
     try:
         _validate_batch_for_activation(batch)
     except PublishError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    manifest.update(status='AUDITED', manual_review={'actor': str(ctx.user_id), 'at': datetime.now(timezone.utc).isoformat(),
+    manifest.update(status='AUDITED', manual_review={'actor': str(ctx.user_id), 'at': datetime.now(UTC).isoformat(),
                     'evaluation_sha256': request.candidate_report_sha256})
     atomic_json(batch/'manifest.json', manifest)
     return {'status':'AUDITED','release_id':release_id,'activated':False}
+
+
+@router.post('/deliveries', status_code=202)
+async def receive_delivery(file: UploadFile = File(...), manifest_sha256: str = Form(...),
+                           trade_date: date = Form(...), ctx: AccessContext = Depends(require_admin)):
+    _require_write_enabled()
+    import zipfile
+
+    from app.strategy_integration.lab_delivery import MAX_BYTES, receive
+    archive = await file.read(MAX_BYTES + 1)
+    try:
+        result = receive(_job_root()/'deliveries', archive, manifest_sha256)
+        job = _save_job('EVALUATE', {'delivery_id': result['delivery_id'],
+                                    'trade_date': trade_date.isoformat()})
+        return {**result, **job}
+    except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await file.close()
+
+
+@router.post('/deliveries/chunks', status_code=202)
+async def receive_delivery_chunk(file: UploadFile = File(...), manifest_sha256: str = Form(...),
+                                 chunk_index: int = Form(...), total_bytes: int = Form(...),
+                                 trade_date: date = Form(...), ctx: AccessContext = Depends(require_admin)):
+    _require_write_enabled()
+    import zipfile
+
+    from app.strategy_integration.lab_delivery import CHUNK_BYTES, receive_chunk
+    try:
+        part = await file.read(CHUNK_BYTES + 1)
+        result = receive_chunk(_job_root()/'deliveries', part, manifest_sha256, chunk_index, total_bytes)
+        if result['status'] == 'PART_ACCEPTED':
+            return result
+        job = _save_job('EVALUATE', {'delivery_id':result['delivery_id'], 'trade_date':trade_date.isoformat()})
+        return {**result, **job}
+    except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await file.close()

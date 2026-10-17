@@ -76,3 +76,43 @@ def test_json_snapshot_roundtrip(monkeypatch, tmp_path):
     f.write_text(json.dumps(fixture()), encoding="utf-8")
     monkeypatch.setenv("STRATEGY_RESEARCH_SNAPSHOT", str(f))
     assert read_snapshot()["metadata"]["version"] == "test-fixture"
+
+
+def independent_fixture():
+    """Reuse the wire fixture, explicitly select the new production contract."""
+    p = fixture()
+    p['metadata'].update(maturity_contract='INDEPENDENT_STRUCTURE_AND_PATH_V1', path_horizon=20)
+    for row in p['events']:
+        row['structure_outcome'] = row['outcome']
+        row['path_status'] = 'UNRESOLVED' if row['outcome'] == 'UNRESOLVED' else 'MATURED'
+        if row['path_status'] == 'MATURED':
+            row['path'] = [row.get('path', [{'favorable_pct': 1., 'adverse_pct': 1.}])[0].copy() for _ in range(20)]
+    return p
+
+
+def test_path_maturity_is_independent_of_structure_resolution():
+    p = independent_fixture()
+    # Enough next-open bars, while the structural label is still unresolved.
+    row = p['events'][2]
+    row.update(path_status='MATURED', endpoint_pct=9., mfe_pct=11., mae_pct=2., mdd_pct=3.,
+               path=[{'favorable_pct': 11., 'adverse_pct': 2.} for _ in range(20)])
+    # Conversely, structure can resolve before the 20-bar path matures.
+    p['events'][0].update(path_status='UNRESOLVED', endpoint_pct=None, mfe_pct=None, mae_pct=None, mdd_pct=None, path=None)
+    a = evaluate(_check_snapshot(p), 'BUY', None, 5, 5)['models'][0]
+    assert (a['n_structure_matured'], a['n_unresolved'], a['n_path'], a['n_path_unresolved']) == (2, 1, 2, 1)
+    assert a['endpoint_p50'] == 1.5  # -6 and +9, including unresolved structure
+    assert a['joint_count'] == 1
+
+
+@pytest.mark.parametrize('mutation', ['short_path', 'unmatured_metrics', 'missing_status'])
+def test_independent_maturity_contract_fails_closed(mutation):
+    p = independent_fixture()
+    row = p['events'][0]
+    if mutation == 'short_path':
+        row['path'].pop()
+    elif mutation == 'unmatured_metrics':
+        row['path_status'] = 'UNRESOLVED'
+    else:
+        row.pop('structure_outcome')
+    with pytest.raises(SnapshotInvalid):
+        _check_snapshot(p)

@@ -16,6 +16,8 @@ import {
 } from './candidateTimeline'
 import styles from './strategyResearchPage.module.scss'
 import { chartWindow, MIN_VISIBLE_BARS } from './chartWindow'
+import {SCORE_FAMILIES,scorePoints,scoreValue} from './scorePoints'
+import {scorePrimitive} from './scorePrimitive'
 
 const UP = '#ef5350'       // A股红涨
 const DOWN = '#26a69a'     // A股绿跌
@@ -42,13 +44,21 @@ export default function CandidateScoreChart({
   onSelect: (candidateId: string, stage: string) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
-  const trackHosts = useRef<Array<HTMLDivElement | null>>([])
+  const scoreHost = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
+  const viewport = useRef<{from:number;to:number}|null>(null)
   const series = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const callbacks = useRef({ candidates, onSelect })
   callbacks.current = { candidates, onSelect }
   const [hoverDate, setHoverDate] = useState<string | null>(null)
   const [range, setRange] = useState('90根')
+  const [visibleBars,setVisibleBars]=useState(0)
+  const [rawScores,setRawScores]=useState(false)
+  const [hiddenFamilies,setHiddenFamilies]=useState<string[]>([])
+  const [scoreStage,setScoreStage]=useState('ALL')
+  const [pickedDate,setPickedDate]=useState<string|null>(null)
+  const [selectedScoreId,setSelectedScoreId]=useState<string|null>(null)
+  const points=useMemo(()=>scorePoints(candidates).filter(p=>!hiddenFamilies.includes(p.family)&&(scoreStage==='ALL'||p.stage===scoreStage)),[candidates,hiddenFamilies,scoreStage])
   const [showH, setShowH] = useState(true)
   const [showL, setShowL] = useState(true)
 
@@ -61,6 +71,7 @@ export default function CandidateScoreChart({
   const lifecycle = selected && current
     ? candidateLifecycleAsOf(bars, selected, current)
     : undefined
+  const selectedPoint=points.find(p=>p.id===selectedScoreId&&p.candidateId===selectedId&&p.stage===stage)
   const currentBar = hoverDate ? bars.find(b => b.date === hoverDate) : undefined
 
   const validationError = useMemo(() => {
@@ -119,63 +130,48 @@ export default function CandidateScoreChart({
         time:toTime(p.anchor_date),value:p.price,
       })))
     }
-    const lanes = [
-      {name: 'D0 · 极值倾向', layer: 'd0_score', kind: null},
-      {name: 'L1 · 高点确认', layer: 'l1_score', kind: 'H'},
-      {name: 'L1 · 低点确认', layer: 'l1_score', kind: 'L'},
-      {name: 'L2 · 向下突破', layer: 'l2_score', kind: 'H'},
-      {name: 'L2 · 向上突破', layer: 'l2_score', kind: 'L'},
-    ] as const
-    const laneCharts: IChartApi[] = []
-    for (const [i, lane] of lanes.entries()) {
-      const laneHost = trackHosts.current[i]
-      if (!laneHost || !candidates.length) continue
-      const laneChart = createChart(laneHost, {
-        width: Math.max(host.clientWidth, 1), height: 96,
-        layout: {background: {type: ColorType.Solid, color: '#141d29'}, textColor: '#b1becf'},
-        grid: {vertLines: {color: '#242f3c'}, horzLines: {color: '#293643'}},
-        timeScale: {visible: i === 4, rightOffset: 6, barSpacing: 11},
-        rightPriceScale: {borderColor: '#435269', minimumWidth: 65},
-      })
-      const scores = new Map<string, Array<{value: number; threshold: number | null; kind: string; candidateId: string; stage: string}>>()
-      for (const candidate of candidates) {
-        if (lane.kind && candidate.kind !== lane.kind) continue
-        for (const o of candidate.observations) {
-          const value = o[lane.layer]
-          if (value != null) scores.set(o.decision_date, [...(scores.get(o.decision_date) ?? []),
-            {value, threshold: (lane.layer === 'd0_score' ? o.d0_threshold : lane.layer === 'l1_score' ? o.l1_threshold : o.l2_threshold) ?? null,
-              kind: candidate.kind, candidateId: candidate.candidate_id, stage: o.stage}])
-        }
+    const laneCharts:IChartApi[]=[]
+    if(scoreHost.current&&candidates.length){
+      const sc=createChart(scoreHost.current,{width:Math.max(host.clientWidth,1),height:210,
+        layout:{background:{type:ColorType.Solid,color:'#141d29'},textColor:'#b1becf'},
+        grid:{vertLines:{color:'#242f3c'},horzLines:{color:'#293643'}},
+        rightPriceScale:{minimumWidth:65},timeScale:{rightOffset:6,barSpacing:11},crosshair:{mode:CrosshairMode.Normal}})
+      const axis=sc.addLineSeries({lineVisible:false,pointMarkersVisible:false,lastValueVisible:false,priceLineVisible:false,
+        autoscaleInfoProvider:()=>({priceRange:rawScores?{minValue:0,maxValue:1}:{minValue:-1,maxValue:1}})})
+      axis.setData(bars.map(b=>({time:toTime(b.date),value:rawScores?.5:0})))
+      if(!rawScores)axis.createPriceLine({price:0,color:'#a8b4c6',lineWidth:1,lineStyle:0,axisLabelVisible:true,title:'阈值基准'})
+      axis.attachPrimitive(scorePrimitive(points,rawScores))
+      let crossSync=false
+      const syncCross=(time:Time|undefined,fromScore:boolean)=>{
+        if(crossSync)return
+        crossSync=true
+        try{
+          setHoverDate(time?dateFromTime(time):null)
+          const bar=time?bars.find(b=>b.date===dateFromTime(time)):undefined
+          if(!time||!bar){c.clearCrosshairPosition();sc.clearCrosshairPosition();return}
+          if(fromScore)c.setCrosshairPosition(bar.close,time,candle)
+          else sc.setCrosshairPosition(scoreValue(points.find(p=>p.date===bar.date)??{score:0,threshold:0},rawScores),time,axis)
+        }finally{crossSync=false}
       }
-      for (const [index, task] of (lane.layer === 'd0_score' ? ['D0_H','D0_L'] : ['D1','D2','D3']).entries()) {
-        const stageName = task.split('_')[0]
-        const kind = lane.kind ?? task.split('_')[1]
-        const color = kind === 'H' ? ORANGE : BLUE
-        const matches = (x: {stage: string; kind: string}) => x.stage === stageName && x.kind === kind
-        const line = laneChart.addLineSeries({color,
-          lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: lane.layer === 'd0_score' ? 3 : index + 2,
-          priceLineVisible: false, lastValueVisible: false,
-          autoscaleInfoProvider: () => ({priceRange: {minValue: 0, maxValue: 1}})})
-        const threshold = [...scores.values()].flat().find(matches)?.threshold
-        if (threshold != null) line.createPriceLine({price: threshold, color, lineWidth: 1,
-          lineStyle: (index + 1) as 1 | 2 | 3, axisLabelVisible: false, title: `${task} 阈值`})
-        line.setData(bars.map(b => {
-          const item = scores.get(b.date)?.find(matches)
-          return item ? {time: toTime(b.date), value: item.value} : {time: toTime(b.date)}
-        }))
-      }
-      laneChart.subscribeCrosshairMove(param => setHoverDate(param.time ? dateFromTime(param.time) : null))
-      laneChart.subscribeClick(param => {
-        if (!param.time) return
-        const hit = scores.get(dateFromTime(param.time))?.[0]
-        if (hit) callbacks.current.onSelect(hit.candidateId, hit.stage)
+      sc.subscribeCrosshairMove(p=>syncCross(p.time,true))
+      c.subscribeCrosshairMove(p=>syncCross(p.time,false))
+      sc.subscribeClick(p=>{
+        if(!p.time||!p.point)return
+        const date=dateFromTime(p.time)
+        const hits=points.filter(v=>v.date===date).filter(v=>{
+          const y=axis.priceToCoordinate(scoreValue(v,rawScores));return y!=null&&Math.abs(y-p.point!.y)<=9
+        })
+        setPickedDate(date)
+        if(hits.length===1){setSelectedScoreId(hits[0].id);callbacks.current.onSelect(hits[0].candidateId,hits[0].stage)}
+        // Overlapping glyphs stay selectable in the same-day observation list.
       })
-      laneCharts.push(laneChart)
+      laneCharts.push(sc)
     }
     let syncing = false
     const allCharts = [c, ...laneCharts]
     for (const origin of allCharts) origin.timeScale().subscribeVisibleLogicalRangeChange(range => {
       if (!range || syncing) return
+      setVisibleBars(Math.max(0,Math.round(Math.min(bars.length-1,range.to)-Math.max(0,range.from)+1)))
       syncing = true
       try { for (const target of allCharts) if (target !== origin) {
         const previous = target.timeScale().getVisibleLogicalRange()
@@ -184,13 +180,15 @@ export default function CandidateScoreChart({
       } }
       finally { syncing = false }
     })
-    const initial = chartWindow(bars.length)
+    const initial = viewport.current ?? chartWindow(bars.length)
     if (initial) c.timeScale().setVisibleLogicalRange(initial)
     chart.current = c
     series.current = candle
 
     const resize = new ResizeObserver(([entry]) => {
+      const logical=c.timeScale().getVisibleLogicalRange()
       for (const target of allCharts) target.applyOptions({ width: Math.max(Math.floor(entry.contentRect.width), 1) })
+      if(logical)for(const target of allCharts)target.timeScale().setVisibleLogicalRange(logical)
     })
     resize.observe(host)
 
@@ -199,7 +197,8 @@ export default function CandidateScoreChart({
       if (!param.time) return
       const date = dateFromTime(param.time)
       const matches = callbacks.current.candidates.filter(x => x.anchor_date === date)
-      if (matches.length) {
+      setPickedDate(date)
+      if (matches.length === 1) {
         const item = matches[0]
         callbacks.current.onSelect(item.candidate_id, item.observations[0]?.stage ?? 'D1')
       }
@@ -207,11 +206,12 @@ export default function CandidateScoreChart({
     return () => {
       resize.disconnect()
       for (const lane of laneCharts) lane.remove()
+      viewport.current=c.timeScale().getVisibleLogicalRange()
       c.remove()
       chart.current = null
       series.current = null
     }
-  }, [bars, candidates, validationError, structure, tvOverlay])
+  }, [bars, candidates, validationError, structure, tvOverlay, points, rawScores])
 
   useEffect(() => {
     if (!series.current || validationError) return
@@ -287,28 +287,31 @@ export default function CandidateScoreChart({
       </div>
       <p className={styles.hint}>
         A股红涨绿跌｜滚轮缩放、鼠标拖动、十字线读日期及OHLC｜
-        当前实际数据含 {bars.length} 根K线（{bars[0].date}～{bars[bars.length-1].date}）。
+        <span aria-label="实际可见K线数量">当前视窗 {visibleBars} 根</span>｜当前实际数据含 {bars.length} 根K线（{bars[0].date}～{bars[bars.length-1].date}）。
         {bars.length < MIN_VISIBLE_BARS ? `当前版本不足90根，仅展示真实的${bars.length}根；需发布更完整行情区间。` : '初始视窗与事件定位均至少保留90根真实日线；可拖动查看更早数据。'}
       </p>
       <div className={styles.strategyTradingChart} ref={ref} role="img"
         aria-label="A股历史日K，红涨绿跌，低点和高点均为早期研究候选" />
-      {candidates.length > 0 && <div className="model-score-tracks" aria-label="五类模型评分轨道">
-        {['D0 · 极值倾向','L1 · 高点确认','L1 · 低点确认','L2 · 向下突破','L2 · 向上突破'].map((label,i) => <section key={label}>
-          <div className="hint">{label} · 原始分数 0–1 · D1 小点 / D2 中点 / D3 大点，横线为各任务阈值；D0 蓝低 / 橙高</div>
-          <div ref={el => {trackHosts.current[i] = el}} role="img" aria-label={`${label}时间对齐评分轨道`} />
-        </section>)}
-      </div>}
+      {candidates.length>0&&<section className="model-score-tracks" aria-label="统一模型评分副图">
+        <div className="control-row" style={{padding:'8px 0'}}>
+          <strong>模型评分</strong><button type="button" className="btn tiny" aria-pressed={rawScores} onClick={()=>setRawScores(v=>!v)}>{rawScores?'原始分数 0–1':'阈值差 · 零线为门限'}</button>
+          <select className="select" aria-label="评分阶段" value={scoreStage} onChange={e=>setScoreStage(e.target.value)}><option value="ALL">全部阶段</option>{['D0','D1','D2','D3'].map(v=><option key={v}>{v}</option>)}</select>
+          <select className="select" aria-label="评分观测日期" value={pickedDate??''} onChange={e=>setPickedDate(e.target.value||null)}><option value="">跟随光标</option>{[...new Set(points.map(p=>p.date))].sort().map(day=><option key={day}>{day}</option>)}</select>
+          {SCORE_FAMILIES.map(f=><button key={f.id} type="button" className="btn tiny" style={{color:f.color,opacity:hiddenFamilies.includes(f.id)?.45:1}} aria-pressed={!hiddenFamilies.includes(f.id)} onClick={()=>setHiddenFamilies(v=>v.includes(f.id)?v.filter(x=>x!==f.id):[...v,f.id])}>{f.label}</button>)}
+        </div>
+        <p className={styles.hint}>■ D0　● D1　◆ D2　▲ D3。阈值差＝原始分数－对应阈值，不是跨模型可比较的成功概率。重合点点击后在下方精确选择。</p>
+        <div ref={scoreHost} role="img" aria-label="统一模型评分，六类颜色与阶段形状，时间轴与主K线联动" />
+      </section>}
       {currentBar && <p className={styles.strategyCrosshairBar}>
         {currentBar.date}　开 {currentBar.open.toFixed(3)}　高 {currentBar.high.toFixed(3)}
        　低 {currentBar.low.toFixed(3)}　收 {currentBar.close.toFixed(3)}
       </p>}
-      {hoverDate && candidates.length > 0 && <div className="score-date-detail" aria-live="polite">
-        <strong>{hoverDate} · 全部同日模型观测</strong>
-        <div className="control-row">{candidates.flatMap(candidate => candidate.observations
-          .filter(o => o.decision_date === hoverDate).map(o => <button type="button" className="btn tiny"
-            key={o.observation_id} onClick={() => onSelect(candidate.candidate_id,o.stage)}>
-            {candidate.kind} {o.stage} · {o.stage === 'D0' ? `D0 ${fmt(o.d0_score)}` : `L1 ${fmt(o.l1_score)} / L2 条件 ${fmt(o.l2_score)}`}
-          </button>))}</div>
+      {(pickedDate||hoverDate) && candidates.length > 0 && <div className="score-date-detail" aria-live="polite">
+        <strong>{pickedDate||hoverDate} · 同日模型观测</strong>{pickedDate&&<button type='button' className='btn tiny' onClick={()=>setPickedDate(null)}>跟随光标</button>}
+        {pickedDate&&<div className="control-row">{candidates.filter(c=>c.anchor_date===pickedDate).flatMap(c=>c.observations.map(o=><button type="button" className="btn tiny" key={o.observation_id} onClick={()=>onSelect(c.candidate_id,o.stage)}>锚点 {c.anchor_date} {c.kind} → 评分 {o.decision_date} {o.stage}</button>))}</div>}
+        <div className="control-row">{points.filter(p=>p.date===(pickedDate||hoverDate)).map(p=><button type="button" className="btn tiny" style={{color:p.color}} key={p.id} onClick={()=>{setSelectedScoreId(p.id);onSelect(p.candidateId,p.stage)}}>
+          {p.family} {p.stage} · 锚点 {p.anchorDate} · 评分 {p.date} · 原值 {fmt(p.score)} / 阈值 {fmt(p.threshold)} / 差 {fmt(scoreValue(p,false))}
+        </button>)}</div>
       </div>}
       <p className={styles.hint}>
         {structure ? <>
@@ -325,8 +328,9 @@ export default function CandidateScoreChart({
             aria-pressed={o.stage === current.stage} onClick={() => onSelect(selected.candidate_id,o.stage)}>{o.stage}</button>)}</div>
         <p>{current.stage === 'D0' ? `D0 极值倾向 ${fmt(current.d0_score)} / 阈值 ${fmt(current.d0_threshold)}` :
           `L1 ${fmt(current.l1_score)} / 阈值 ${fmt(current.l1_threshold)} · L2 条件分数 ${fmt(current.l2_score)} / 阈值 ${fmt(current.l2_threshold)}`}
+          {selectedPoint && ` · 选中 ${selectedPoint.family} · 阈值差 ${scoreValue(selectedPoint,false).toFixed(3)}`}
           {current.first_breakout ? ' · 本阶段首次突破参考点' : ''}</p>
-        <div className="hint">锚点 {selected.anchor_date} · 观测 {current.observation_id} · {lifecycle ? lifecycleLabel(lifecycle) : '状态待确认'}；L2 条件资格未实时验证。</div>
+        <div className="hint">{current.decision_date === bars[bars.length-1]?.date && current.scoring_status !== 'CANDIDATE_INACTIVE' ? '当日评分' : '历史观测，不沿用为当日评分'} · 锚点 {selected.anchor_date} · 评分 {current.decision_date} · 当前状态 {lifecycleLabel(candidateLifecycleAsOf(bars,selected,{...current,decision_date:bars[bars.length-1].date}))} · 当时状态 {lifecycle ? lifecycleLabel(lifecycle) : '状态待确认'} · 观测 {current.observation_id}；L2 条件资格未实时验证。</div>
       </>}
       {tvOverlay ? <p className={styles.hint}>蓝线直接复用 TV ZigZag 代码；虚线存在时它就是最后一段，否则取最后实线。实线末端仍可能变化，不等同完全确认；方向不由回归或当前 K 线涨跌决定。</p> : structure && <p className={styles.hint}>黄线为截至 {structure.as_of} 已确认研究结构；缺少 TV 末段时不以此替代当前方向。</p>}
     </section>

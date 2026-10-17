@@ -26,6 +26,7 @@ export default function UnifiedEvaluationView({ currentSymbol, embedded = false,
   const navigate = useNavigate()
   const [side, setSide] = useState<StrategySide>('BUY')
   const [scope, setScope] = useState<'market' | 'stock'>(embedded ? 'stock' : 'market')
+  const [period,setPeriod]=useState('TEST')
   const [gain, setGain] = useState(10)
   const [risk, setRisk] = useState(7)
   const [applied, setApplied] = useState({ gain: 10, risk: 7 })
@@ -38,8 +39,8 @@ export default function UnifiedEvaluationView({ currentSymbol, embedded = false,
   }, [gain, risk])
   const validSymbol = /^(SH|SZ|BJ):\d{6}$/.test(currentSymbol)
   const query = useQuery({
-    queryKey: ['strategy-research', 'zigzag', releaseId, side, scope === 'stock' ? currentSymbol : null, applied.gain, applied.risk],
-    queryFn: () => getZigzagEvaluation({ side, release_id: releaseId, symbol: scope === 'stock' ? currentSymbol : undefined, gain_pct: applied.gain, risk_pct: applied.risk }),
+    queryKey: ['strategy-research', 'zigzag', releaseId, period, side, scope === 'stock' ? currentSymbol : null, applied.gain, applied.risk],
+    queryFn: () => getZigzagEvaluation({ side, period, release_id: releaseId, symbol: scope === 'stock' ? currentSymbol : undefined, gain_pct: applied.gain, risk_pct: applied.risk }),
     enabled: scope === 'market' || validSymbol,
     staleTime: 120000,
     retry: false,
@@ -90,6 +91,7 @@ export default function UnifiedEvaluationView({ currentSymbol, embedded = false,
         </div>
       </div>
       <div className="panel-body"><div className="filters">
+        <select className="select" aria-label="联合评价信号日期范围" value={period} onChange={e=>setPeriod(e.target.value)}><option value="TEST">TEST 信号窗口</option><option value="POST_TEST">测试后观察</option><option value="VAL">VAL 信号窗口</option><option value="TRAIN">TRAIN 信号窗口</option><option value="UNASSIGNED">未分配窗口</option><option value="ALL">全部窗口（混合）</option></select>
         <label className="smalllabel" htmlFor="unified-target-range">目标最大有利空间 MFE ≥</label>
         <input id="unified-target-range" className="range" type="range" min={3} max={24} step={1} value={gain} onChange={e => setGain(Number(e.target.value))} /><b className="mono">{gain}%</b>
         <label className="smalllabel" htmlFor="unified-risk-range">可承受最大不利幅度 |MAE| ≤</label>
@@ -102,11 +104,13 @@ export default function UnifiedEvaluationView({ currentSymbol, embedded = false,
       query.isError ? <div className="live-empty live-error" role="alert">{errorText(query.error)}</div> :
       !result ? <div className="live-empty">无已发布评价数据。</div> : <>
       <div className="hint" style={{ margin: '4px 0 14px' }}>已审计快照 {result.metadata.version} · 协议 {result.metadata.evaluation_protocol} · Cohort {result.metadata.cohort} · 审计 {result.metadata.audit_ref} · 生成 {result.metadata.generated_at}</div>
+      {result.metadata.maturity_contract !== 'INDEPENDENT_STRUCTURE_AND_PATH_V1' && <div className="notice warning" style={{marginBottom:14}}>当前为旧评价协议，收益路径样本仍可能受结构成熟条件筛选；须重算后才能用于本轮新口径验收。</div>}
+      <p className="hint">按信号日期分组，结果成熟截至快照日期，20 根路径可能跨窗口；此监控统计与 lab 严格切割测试报告分别展示。测试后观察包含未上线历史，不等同上线实盘。</p>
       <div className="overview">
         <div className="metric"><div className="k">选中模型信号行</div><div className="v mono">{nSignal.toLocaleString()}</div><div className="d">跨阶段信号不去重；本方向独立事件 {result.n_unique_events ?? '未提供'} 个</div></div>
         <div className="metric"><div className="k">联合达标比例</div><div className="v mono">{fmtRate(nPath ? nJoint / nPath : null)}</div><div className="d">路径可用 {nPath} 行 · MFE 与 MAE 同时达标</div></div>
         <div className="metric"><div className="k">目标先于风险阈值</div><div className="v mono">{fmtRate(nPath ? nFirst / nPath : null)}</div><div className="d">目标先触达 {nFirst} / 路径样本 {nPath}；同日不明 {nUnknown}</div></div>
-        <div className="metric"><div className="k">结果未成熟 / 删失</div><div className="v mono">{nPending.toLocaleString()}</div><div className="d">已成熟 {nResolved} 行；未成熟不算失败</div></div>
+        <div className="metric"><div className="k">结构未决 / 路径未满</div><div className="v mono">{nPending.toLocaleString()} / {(nSignal - nPath).toLocaleString()}</div><div className="d">结构已决 {nResolved} · 路径满期 {nPath}；分母独立</div></div>
       </div>
       {models.length === 0 ? <div className="live-empty">当前没有可展示的模型，或已全部关闭。</div> : <>
         <div className="eval-panels">
@@ -130,23 +134,23 @@ export default function UnifiedEvaluationView({ currentSymbol, embedded = false,
         </div>
         <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel-head"><div><h2>模型比较统计表</h2><div className="hint">信号行与独立事件不可混算；未校准模型分数不能当成功概率。</div></div></div>
-          <div className="table-wrap"><table className="data-table dense-table"><thead><tr><th>模型</th><th>信号行 / 成熟</th><th>成功率</th><th>终点 P50</th><th>MFE P75</th><th>MAE P80</th><th>MDD P90</th><th>联合达标</th><th>样本质量</th></tr></thead><tbody>{models.map((model, index) => <tr key={model.model_id}>
-            <td style={{ color: modelVisual(model.model_id, index).color }}>{model.model_name}</td><td>{model.n_signals} / {model.n_resolved}</td>
-            <td>{fmtRate(model.success_rate)}</td><td>{fmtPct(model.endpoint_p50, true)}</td><td>{fmtPct(model.mfe_p75)}</td><td>{fmtPct(model.mae_p80)}</td><td>{fmtPct(model.mdd_p90)}</td><td>{fmtRate(model.joint_rate)}</td><td>{model.n_unresolved ? `未成熟 ${model.n_unresolved}` : '已成熟'}</td>
+          <div className="table-wrap"><table className="data-table dense-table"><thead><tr><th>模型</th><th>信号 / 结构已决 / 路径满期</th><th>结构 HH/LL 达成率</th><th>终点 P50</th><th>MFE P75</th><th>MAE P80</th><th>MDD P90</th><th>联合达标</th><th>样本质量</th></tr></thead><tbody>{models.map((model, index) => <tr key={model.model_id}>
+            <td style={{ color: modelVisual(model.model_id, index).color }}>{model.model_name}</td><td>{model.n_signals} / {model.n_resolved} / {model.n_path}</td>
+            <td>{fmtRate(model.success_rate)}</td><td>{fmtPct(model.endpoint_p50, true)}</td><td>{fmtPct(model.mfe_p75)}</td><td>{fmtPct(model.mae_p80)}</td><td>{fmtPct(model.mdd_p90)}</td><td>{fmtRate(model.joint_rate)}</td><td>{`结构未决 ${model.n_unresolved} · 路径未满 ${model.n_path_unresolved ?? model.n_signals - model.n_path}`} </td>
           </tr>)}</tbody></table></div>
         </div>
         <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel-head"><div><h2>历史事件明细</h2><div className="hint">已发布事件样本；完整身份字段齐备时才能精准跳转对应个股候选。</div></div></div>
-          <div className="table-wrap"><table className="data-table dense-table"><thead><tr><th>日期</th><th>股票</th><th>模型</th><th>结果</th><th>MFE</th><th>MAE</th><th>MDD</th><th>终点</th><th>操作</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.model_id}:${row.event_id}:${index}`}>
-            <td>{row.signal_time}</td><td>{row.symbol}</td><td>{row.model_id}</td><td>{row.outcome === 'SUCCESS' ? '成功' : row.outcome === 'FAIL' ? '失败' : '未成熟'}</td>
+          <div className="table-wrap"><table className="data-table dense-table"><thead><tr><th>日期</th><th>股票</th><th>模型</th><th>结构结果</th><th>收益路径</th><th>MFE</th><th>MAE</th><th>MDD</th><th>终点</th><th>操作</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.model_id}:${row.event_id}:${index}`}>
+            <td>{row.signal_time}</td><td>{row.symbol}</td><td>{row.model_id}</td><td>{row.outcome === 'SUCCESS' ? 'HH/LL 达成' : row.outcome === 'FAIL' ? '未达成' : '结构未决'}</td><td>{row.path_status === 'MATURED' ? '20 根满期' : row.path_status === 'UNRESOLVED' ? '未满期' : '旧协议'}</td>
             <td>{fmtPct(row.mfe_pct, true)}</td><td>{fmtPct(row.mae_pct)}</td><td>{fmtPct(row.mdd_pct)}</td><td>{fmtPct(row.endpoint_pct, true)}</td>
             <td><button type="button" className="btn tiny" disabled={!canLocate(row)} onClick={() => locate(row)}>{canLocate(row) ? '定位候选 →' : '无完整身份'}</button></td>
-          </tr>)}{!rows.length && <tr><td colSpan={9}>没有已发布的事件明细</td></tr>}</tbody></table></div>
+          </tr>)}{!rows.length && <tr><td colSpan={10}>没有已发布的事件明细</td></tr>}</tbody></table></div>
         </div>
       </>}
       <p className="research-footer">历史评价展示经验机会包络而非可交易收益；同事件多 D 阶段相关，需按独立事件与时间可见性审计。模型、数据和协议均来自服务端已发布审计快照。</p>
     </>}
-    <BreakoutEvaluationView symbol={scope === 'stock' ? currentSymbol : undefined} releaseId={releaseId} gain={applied.gain} risk={applied.risk} />
+    <BreakoutEvaluationView symbol={scope === 'stock' ? currentSymbol : undefined} releaseId={releaseId} gain={applied.gain} risk={applied.risk} period={period} />
     {selected && <div role="presentation" style={{ position: 'fixed', zIndex: 9999, inset: 0, display: 'grid', placeItems: 'center', background: '#030c16dd' }} onClick={() => setSelected(null)}>
       <div role="dialog" aria-modal="true" aria-label="历史事件详情" className="panel" style={{ width: 'min(490px,94vw)', padding: 22 }} onClick={event => event.stopPropagation()}>
         <h2>历史事件 · {selected.model_id}</h2><p>{selected.symbol} · {selected.signal_time}</p>

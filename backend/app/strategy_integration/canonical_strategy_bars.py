@@ -4,9 +4,10 @@ This is for a DB-backed, explicitly authorized off-line export, not an HTTP
 handler. It never calculates an adjustment factor or calls external providers.
 """
 from __future__ import annotations
+
 from collections import Counter
 from datetime import date
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -89,7 +90,8 @@ async def load_official_qfq_stock_batch(
     qfq-adjusted bar. No stock is excluded merely for a valid corporate action.
     """
     from app.services.market_data_aggregation_service import (
-        MarketDataAggregationService, MarketDataSourcePolicy,
+        MarketDataAggregationService,
+        MarketDataSourcePolicy,
     )
     if start_date > as_of or batch_size < 1 or min_bars < 1:
         raise CanonicalMarketDataError("BAD_CANONICAL_READ_PARAMETERS")
@@ -98,6 +100,8 @@ async def load_official_qfq_stock_batch(
     accepted: dict[str, pd.DataFrame] = {}
     hashes: dict[str, dict] = {}
     excluded: Counter[str] = Counter()
+    excluded_symbols: dict[str, str] = {}
+    stale_symbols: list[str] = []
     covered = 0
     for off in range(0, len(ids), batch_size):
         chunk = ids[off:off+batch_size]
@@ -125,46 +129,56 @@ async def load_official_qfq_stock_batch(
             stock = result.get(iid)
             if isinstance(stock, Exception) or stock is None:
                 excluded["mdas_error"] += 1
+                excluded_symbols[symbol] = "mdas_error"
                 continue
             bars = stock.bars
             if bars is None or bars.empty or len(bars) < min_bars:
                 excluded["too_short_or_missing"] += 1
+                excluded_symbols[symbol] = "too_short_or_missing"
                 continue
             # In MDAS qfq mode, a missing factor can yield unchanged raw bars;
             # a missing provenance hash MUST NOT be treated as valid qfq.
             if stock.degraded or not stock.adj_factor_hash:
                 excluded["missing_or_degraded_factor"] += 1
+                excluded_symbols[symbol] = "missing_or_degraded_factor"
                 continue
             dates = pd.to_datetime(bars.index)
             if dates.has_duplicates or not dates.is_monotonic_increasing:
                 excluded["duplicate_or_unsorted_dates"] += 1
+                excluded_symbols[symbol] = "duplicate_or_unsorted_dates"
                 continue
             if dates[-1].date() > as_of:
                 excluded["future_bar"] += 1
+                excluded_symbols[symbol] = "future_bar"
                 continue
             arr = bars[["open","high","low","close","volume"]].apply(
                 pd.to_numeric, errors="coerce",
             ).to_numpy(dtype=float)
             if not np.isfinite(arr).all() or not (arr[:,:4] > 0).all() or (arr[:,4] < 0).any():
                 excluded["invalid_ohlcv"] += 1
+                excluded_symbols[symbol] = "invalid_ohlcv"
                 continue
             if (arr[:,1] < np.maximum.reduce([arr[:,0],arr[:,2],arr[:,3]])).any() or (
                 arr[:,2] > np.minimum.reduce([arr[:,0],arr[:,1],arr[:,3]])
             ).any():
                 excluded["invalid_candle"] += 1
+                excluded_symbols[symbol] = "invalid_candle"
                 continue
             native = raw_result.get(iid)
             if isinstance(native, Exception) or native is None or native.bars is None:
                 excluded['missing_mdas_raw_bars'] += 1
+                excluded_symbols[symbol] = 'missing_mdas_raw_bars'
                 continue
             raw_bars = native.bars
             if (len(raw_bars) != len(bars) or not pd.DatetimeIndex(raw_bars.index).as_unit('ns').equals(dates.as_unit('ns'))):
                 excluded['mdas_raw_qfq_date_mismatch'] += 1
+                excluded_symbols[symbol] = 'mdas_raw_qfq_date_mismatch'
                 continue
             native_values = raw_bars[['open','high','low','close','volume']].apply(
                 pd.to_numeric, errors='coerce').to_numpy(dtype=float)
             if not np.isfinite(native_values).all() or (native_values[:, :4] <= 0).any() or (native_values[:,4] < 0).any():
                 excluded['invalid_mdas_raw_ohlcv'] += 1
+                excluded_symbols[symbol] = 'invalid_mdas_raw_ohlcv'
                 continue
             # Only one market-data owner: current QFQ remains unchanged.
             raw = pd.DataFrame(arr, columns=['open','high','low','close','volume'])
@@ -193,6 +207,7 @@ async def load_official_qfq_stock_batch(
                         factor_note = 'authoritative_factor_series_attached'
             if with_factor_series and factor_series is None:
                 excluded['missing_authoritative_factor_series'] += 1
+                excluded_symbols[symbol] = 'missing_authoritative_factor_series'
                 continue
             accepted[symbol] = raw
             hashes[symbol] = {
@@ -206,6 +221,8 @@ async def load_official_qfq_stock_batch(
             }
             if dates[-1].date() == as_of:
                 covered += 1
+            else:
+                stale_symbols.append(symbol)
         from .job_progress import progress
         progress("READ_MDAS_BATCHES", min(off+batch_size, len(ids)), len(ids))
     return accepted, {
@@ -220,6 +237,9 @@ async def load_official_qfq_stock_batch(
         "coverage_ratio_of_eligible": round(covered/max(1,len(accepted)),6),
         "coverage_ratio_of_total": round(covered/max(1,len(ids)),6),
         "excluded": dict(excluded),
+        "excluded_symbols": excluded_symbols,
+        "stale_symbols": stale_symbols,
+        "expected_symbols": sorted(instrument_by_id.values()),
         "provenance": hashes,
         "pit_factor_series_available": any(
             v.get("factor_series_for_pit") == "authoritative_factor_series_attached"

@@ -50,13 +50,16 @@ def test_mdas_input_uses_stock_owner_and_limits_before_read(monkeypatch):
     from app.services.instrument_maintenance_service import stock_symbol_sql_filter
     from app.strategy_integration import db_export
     seen = []
-    monkeypatch.delenv('PANJI_STRATEGY_READ_ONLY_DATABASE', raising=False)
+    monkeypatch.setenv('PANJI_STRATEGY_READ_ONLY_DATABASE', '1')
+    monkeypatch.setattr(readonly, '_installed', True)
     class Session:
         async def __aenter__(self):
             return self
         async def __aexit__(self, *args):
             pass
         async def execute(self, statement):
+            if str(statement) == 'SHOW transaction_read_only':
+                return SimpleNamespace(scalar_one=lambda:'on')
             assert statement._where_criteria[0].compare(stock_symbol_sql_filter(Instrument))
             assert statement._limit_clause.value == 25
             return SimpleNamespace(all=lambda: [SimpleNamespace(id='i1', symbol='600000', market='SH')])
@@ -67,4 +70,4 @@ def test_mdas_input_uses_stock_owner_and_limits_before_read(monkeypatch):
     monkeypatch.setattr(db_export, 'load_official_qfq_stock_batch', mdas)
     _, report = asyncio.run(db_export.read_official_qfq_stock_batch(date(2026,10,16), max_symbols=25))
     assert seen == [{'i1': 'SH:600000'}]
-    assert report['connection_read_only_verified'] is False
+    assert report['connection_read_only_verified'] is True

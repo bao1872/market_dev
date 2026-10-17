@@ -61,7 +61,7 @@ export default function UnifiedTodayView({ focus }: {
       </div>
       <div className="panel">
         <div className="panel-head">
-          <div><h2>同一张机会清单 · 预测与首次突破</h2><div className="hint">“候选方向”和“当前走势”分列；方向/斜率来自同日权威 QFQ 行情的已确认结构，不用 H/L 猜测当下走势。</div></div>
+          <div><h2>同一张机会清单 · 预测与首次突破</h2><div className="hint">“候选方向”和“当前走势”分列；方向/斜率来自同日权威 QFQ 行情的 TV ZigZag 最后一段，不用 H/L 猜测当下走势。</div></div>
           <div className="filters">
             <div className="seg" aria-label="候选方向">
               {([['ALL','全部'],['L','买入'],['H','卖出']] as const).map(([value,label]) => <button key={value} type="button" className={kind === value ? 'active' : ''} aria-pressed={kind === value} onClick={() => changeKind(value)}>{label}</button>)}
@@ -93,8 +93,8 @@ export default function UnifiedTodayView({ focus }: {
         })}{!shown.length && <tr><td colSpan={11}>当前筛选下无符合条件的已发布候选；不代表没有行情机会。</td></tr>}</tbody></table></div>
         <div className="table-footer"><span className="list-status">{filtered.length} 行 · {safePage + 1}/{totalPages} 页 · 每页最多 {PER_PAGE} 行（仅请求可见股票行情）</span><div className="control-row"><button type="button" disabled={safePage === 0} onClick={() => setPage(p => Math.max(0, p - 1))}>上一页</button><button type="button" disabled={safePage >= totalPages - 1} onClick={() => setPage(p => p + 1)}>下一页</button></div></div>
         <div className="panel-body" style={{ borderTop: '1px solid #263c51', padding: '10px 19px' }}><div className="hint">
-          当前走势：由最新已确认结构枢轴至批次日期间的价格回归斜率符号判断向上/向下；与枢轴 L/H 隐含结构方向不一致时显示“结构背离”。
-          累计收益按枢轴价到收盘价计算；斜率按段内复权收盘价的对数线性回归估计，每交易日百分比变化。两者均为已发生价格描述，不是 L1/L2 预测、也不是可执行策略收益。无同日确认结构时显示待确认。
+          当前走势取 TV ZigZag 最后一段：优先最右侧虚线，否则取最后实线，不要求端点完全确认。
+          段收益＝100×(终点价/起点价－1)，收益斜率＝段收益/两端点有效 bar 间隔，单位为百分比点/bar；同 bar 双端点无斜率。两者均为结构描述，不是回归或可交易收益。
         </div></div>
       </div>
       <div className="panel" style={{ marginTop: 14 }}>

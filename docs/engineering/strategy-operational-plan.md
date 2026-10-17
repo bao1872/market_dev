@@ -1,5 +1,7 @@
 # 策略板块可用性闭环计划
 
+> 职责调整：用户于 2026-10-17 批准 `strategy-production-simplification-plan.md`。本文保留此前训练及运行验证历史；新增研究训练已转归 panji_lab。当前远程过渡 TRAIN 与其旧协议候选评价继续按原授权保留，不作为新链路激活依据。
+
 2026-10-17，用户要求在五类模型设计基础上完整实施。继承此前未提交改动；不覆盖 canonical_strategy_bars.py、db_export.py、历史发布脚本等既有用户修改。
 
 ## 本轮目标

@@ -6,10 +6,10 @@ import {fmtRate,fmtPct} from '@/features/strategy-evaluation/evaluationLogic'
 import {buildCandidateDeepLink} from './candidateLinks'
 import {Link} from 'react-router-dom'
 
-export default function BreakoutEvaluationView({symbol,releaseId,gain,risk}:{symbol?:string;releaseId?:string;gain:number;risk:number}) {
+export default function BreakoutEvaluationView({symbol,releaseId,gain,risk,period='ALL'}:{symbol?:string;releaseId?:string;gain:number;risk:number;period?:string}) {
   const [side,setSide]=useState<StrategySide>('BUY'), [trend,setTrend]=useState('ALL')
-  const q=useQuery({queryKey:['strategy-breakouts',symbol,releaseId,side,trend,gain,risk],
-    queryFn:()=>getZigzagEvaluation({symbol,release_id:releaseId,side,family:'BREAKOUT',trend:trend==='ALL'?undefined:trend,gain_pct:gain,risk_pct:risk}),retry:false,staleTime:120000})
+  const q=useQuery({queryKey:['strategy-breakouts',symbol,releaseId,period,side,trend,gain,risk],
+    queryFn:()=>getZigzagEvaluation({symbol,release_id:releaseId,period,side,family:'BREAKOUT',trend:trend==='ALL'?undefined:trend,gain_pct:gain,risk_pct:risk}),retry:false,staleTime:120000})
   return <section className="panel breakout-evaluation" aria-label="已发生突破专项评价">
     <div className="panel-head"><div><h2>03 / D1–D3 已发生突破 · 后续表现</h2><div className="hint">首次突破独立收录，不要求 L1/L2 超阈值；按突破时可知的走势归组，D2/D3 跟踪不重复计数。</div></div></div>
     <div className="panel-body"><div className="control-row"><select className="select" aria-label="突破方向" value={side} onChange={e=>setSide(e.target.value as StrategySide)}><option value="BUY">上破前高</option><option value="SELL">下破前低</option></select>

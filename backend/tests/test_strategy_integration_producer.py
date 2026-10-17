@@ -80,5 +80,45 @@ def test_h_ll_and_l_hh_structural_target():
     raw=sample()
     ll=[p(30,'L',19,36),p(40,'H',28,46),p(50,'L',18,56)]
     hl=[p(30,'L',19,36),p(40,'H',28,46),p(50,'L',20,56)]
-    assert producer._outcome(raw, ll, 40,'H',41,horizon=30)=='SUCCESS'
-    assert producer._outcome(raw, hl, 40,'H',41,horizon=30)=='FAIL'
+    assert producer._outcome(raw, ll, 40,'H',41)=='SUCCESS'
+    assert producer._outcome(raw, hl, 40,'H',41)=='FAIL'
+
+
+def test_structure_confirmation_can_mature_after_return_horizon():
+    raw = sample()
+    pivots = [dict(bar=30,type='L',price=19,confirmed_at=36),
+              dict(bar=40,type='H',price=28,confirmed_at=46),
+              dict(bar=70,type='L',price=18,confirmed_at=80)]
+    assert producer._outcome(raw.iloc[:70], pivots[:2], 40, 'H', 41) == 'UNRESOLVED'
+    assert producer._outcome(raw.iloc[:81], pivots, 40, 'H', 41) == 'SUCCESS'
+
+
+def test_joint_monitoring_keeps_test_and_post_test_cohorts_separate(setup_model, monkeypatch):
+    from app.services.strategy_research_read_service import _check_snapshot, evaluate
+    f,b = setup_model
+    raw = sample()
+    day = str(raw.datetime.iloc[-1].date())
+    candidates,_ = producer.make_snapshots({'SH:600000':raw},f,b,as_of=day,source_sha='f'*64,chart_bars=180)
+    windows = {'train':['2024-01-01','2024-06-30'],'val':['2024-07-01','2024-08-31'],'test':['2024-09-01','2024-12-31']}
+    snapshot = _check_snapshot(producer.make_evaluation({'SH:600000':raw},candidates['stocks'],f,
+        as_of=day,source_sha='f'*64,split_windows=windows))
+    counts = {period:sum(m['n_signals'] for m in evaluate(snapshot,'BUY',None,5,5,period=period)['models'])
+              for period in ('ALL','TRAIN','VAL','TEST','POST_TEST','UNASSIGNED')}
+    assert counts['TEST'] > 0 and counts['POST_TEST'] > 0
+    assert counts['ALL'] == sum(v for k,v in counts.items() if k != 'ALL')
+    for row in evaluate(snapshot,'BUY',None,5,5,period='POST_TEST')['table']:
+        assert row['signal_time'] > '2024-12-31'
+
+    # Request binding only; capability enforcement is covered by access-control contracts.
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api import strategy_research as api
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api._market_access] = lambda:None
+    monkeypatch.setattr(api,'read_snapshot',lambda:snapshot)
+    client = TestClient(app)
+    response = client.get('/v1/strategy-research/zigzag/evaluation',params={'period':'TEST'})
+    assert response.status_code == 200 and response.json()['period'] == 'TEST'
+    assert sum(m['n_signals'] for m in response.json()['models']) == counts['TEST']
+    assert client.get('/v1/strategy-research/zigzag/evaluation',params={'period':'INVALID'}).status_code == 422

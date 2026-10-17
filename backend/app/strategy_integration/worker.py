@@ -4,16 +4,17 @@ Not called from FastAPI startup, existing DSA scheduler or process import.
 This may run only after production deploy authorization and readiness checks.
 """
 from __future__ import annotations
+
 import argparse
-from datetime import datetime, time
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .release_store import atomic_json, activate_batch
+from .release_store import activate_batch, atomic_json
 
 
 def enabled() -> bool:
@@ -47,6 +48,7 @@ def _train_cmd(runtime: str, bars: Path, instruments: Path, cfg: dict,
     Never trust user-configured split dates independently from rolling_windows.
     """
     from datetime import date as _date
+
     from . import rolling_windows as rw
     as_of = _date.fromisoformat(cfg['as_of'])
     expected = rw.rolling_windows(as_of)['windows']
@@ -67,7 +69,8 @@ def _train_cmd(runtime: str, bars: Path, instruments: Path, cfg: dict,
 
 
 def _roots() -> tuple[Path,Path,Path,Path]:
-    if not enabled():raise RuntimeError('WORKER_DISABLED_PENDING_DEPLOY_APPROVAL')
+    if not enabled():
+        raise RuntimeError('WORKER_DISABLED_PENDING_DEPLOY_APPROVAL')
     r=os.getenv('PANJI_STRATEGY_JOB_ROOT','')
     o=os.getenv('PANJI_STRATEGY_SNAPSHOT_ROOT','')
     bars=os.getenv('PANJI_STRATEGY_BARS_FILE',str(Path(r)/'exports'/'bars.parquet'))
@@ -80,6 +83,7 @@ def _roots() -> tuple[Path,Path,Path,Path]:
 def _run_with_progress(cmd, job, jobs, *, lock_fd):
     import signal
     import time
+
     from .job_store import read_job
     logs = jobs/'logs'
     logs.mkdir(parents=True, exist_ok=True)
@@ -138,7 +142,7 @@ def process_one() -> dict:
         # claim work while an orphaned fitting/scoring process is still alive.
         for running in sorted((jobs/'running').glob('*.json')):
             old = json.loads(running.read_text())
-            old.update(status='FAILED', error='INTERRUPTED_WORKER_RESTART',
+            old.update(status='FAILED', error='INTERRUPTED_WORKER_RESTART', retryable=True,
                        ended_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
             atomic_json(jobs/'failed'/running.name, old)
             running.unlink()
@@ -152,29 +156,63 @@ def process_one() -> dict:
             job.update(status='RUNNING', started_at=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat())
             atomic_json(running, job)
             payload, kind = job['payload'], job['kind']
-            job_dir = jobs/'outputs'/job['job_id']
             runtime = os.getenv('PANJI_STRATEGY_PYTHON', sys.executable)
             try:
                 if kind == 'PREDICT':
+                    from .release_store import resolve_active_release
+                    active = resolve_active_release(snap_root)
+                    if not active:
+                        raise RuntimeError('APPROVED_PRODUCTION_MODEL_REQUIRED')
+                    for key in ('release_id', 'bundle_sha256'):
+                        if not payload.get(key) or payload[key] != active.get(key):
+                            raise RuntimeError('PREDICTION_PINNED_MODEL_CHANGED')
                     cmd = _predict_cmd(runtime, bars, inst, payload['trade_date'], jobs/'exports'/job['job_id'], snap_root)
+                    cmd += ['--expected-active-release-id', payload['release_id'],
+                            '--expected-active-bundle-sha', payload['bundle_sha256']]
                 elif kind == 'EVALUATE':
-                    from .job_store import read_job
                     from .fourteen_adapter import verify_package
-                    training = read_job(jobs, payload['training_job_id'])
-                    if not training or training['kind'] != 'TRAIN' or training['status'] != 'SUCCEEDED':
-                        raise RuntimeError('TRAINING_CANDIDATE_NOT_READY')
-                    package = jobs/'outputs'/training['job_id']/'fourteen_candidate_UNPUBLISHED'
-                    _meta, sha = verify_package(package)
+                    from .job_store import read_job
+                    if payload.get('delivery_id'):
+                        from .lab_delivery import SHA, validate_delivery
+                        sha = payload['delivery_id']
+                        if not isinstance(sha, str) or not SHA.fullmatch(sha):
+                            raise RuntimeError('INVALID_DELIVERY_ID')
+                        package = jobs/'deliveries'/sha
+                        # Verification belongs to this isolated ML runtime, never the API.
+                        validate_delivery(package, sha)
+                    else:
+                        # Transitional read/verification path for the already-running TRAIN.
+                        training = read_job(jobs, payload['training_job_id'])
+                        if not training or training['kind'] != 'TRAIN' or training['status'] != 'SUCCEEDED':
+                            raise RuntimeError('TRAINING_CANDIDATE_NOT_READY')
+                        package = jobs/'outputs'/training['job_id']/'fourteen_candidate_UNPUBLISHED'
+                        _meta, sha = verify_package(package)
                     cmd = _predict_cmd(runtime, bars, inst, payload['trade_date'], jobs/'exports'/job['job_id'], snap_root)
                     cmd += ['--candidate-bundle', str(package), '--candidate-sha', sha]
+                    if payload.get('delivery_id'):
+                        cmd += ['--lab-delivery-id', sha]
                 elif kind == 'TRAIN':
-                    cmd = _train_cmd(runtime, bars, inst, payload, job_dir, jobs/'exports'/job['job_id'])
+                    raise RuntimeError('TRAINING_MOVED_TO_PANJI_LAB')
                 else:
                     raise RuntimeError('UNKNOWN_JOB_KIND')
+                if job.get('retry_of'):
+                    from .cli import _canonical_source_report
+                    from .job_store import retry_source_report
+                    report = retry_source_report(jobs, job)
+                    if report is not None:
+                        cmd += ['--expected-source-sha', _canonical_source_report(report)['source_sha256']]
                 code, tail = _run_with_progress(cmd, job, jobs, lock_fd=lock.fileno())
                 job.update(status='SUCCEEDED' if code == 0 else 'FAILED', return_code=code, stdout_tail=tail)
                 if code != 0:
                     job['error'] = f'PROCESS_EXIT_{code}'
+                    job['retryable'] = False
+                    lines = [line for line in tail.splitlines() if line.startswith('{')]
+                    if lines:
+                        failure = json.loads(lines[-1])
+                        if failure.get('status') == 'FAILED':
+                            job['error'] = str(failure.get('error', job['error']))[:1000]
+                            job['error_class'] = failure.get('error_class')
+                            job['retryable'] = failure.get('error_class') == 'TRANSIENT_IO' and failure.get('retryable') is True
                 if code == 0:
                     lines = [line for line in tail.splitlines() if line.startswith('{')]
                     if not lines:
@@ -190,10 +228,12 @@ def process_one() -> dict:
                         batch = Path(result.get('output', ''))
                         if not batch.is_dir():
                             raise RuntimeError('NO_VALIDATED_SNAPSHOT_OUTPUT')
-                        activate_batch(snap_root, batch)
-                        job['snapshot_pointer_activated'] = True
+                        publication = activate_batch(snap_root, batch, refresh_only=True)
+                        job['publication'] = publication
+                        job['snapshot_pointer_activated'] = publication['status'] == 'ACTIVATED_AFTER_OPERATOR_APPROVAL'
             except Exception as exc:
-                job.update(status='FAILED', error=str(exc)[:1000])
+                from .job_store import failure_details
+                job.update(status='FAILED', **failure_details(exc))
             job['ended_at'] = datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
             atomic_json(jobs/('finished' if job['status'] == 'SUCCEEDED' else 'failed')/req.name, job)
             running.unlink(missing_ok=True)
@@ -202,16 +242,33 @@ def process_one() -> dict:
 
 
 async def scheduled_trade_day(now):
-    if now.time() < time(18, 30):
-        return None
+    days, _ = await scheduled_trade_days(now, limit=1)
+    return days[-1] if days else None
+
+
+async def scheduled_trade_days(now, *, since=None, limit=31):
+    """Calendar-owned close dates, including bounded missed-day compensation."""
+    from datetime import timedelta
+
     from app.db import AsyncSessionLocal
-    from app.services.calendar_service import get_most_recent_trading_day_async
-    from .readonly_runtime import configure_readonly_connections, assert_readonly_session
+    from app.services.calendar_service import (
+        get_most_recent_trading_day_async,
+        get_previous_trading_day_async,
+    )
+
+    from .readonly_runtime import assert_readonly_session, configure_readonly_connections
     configure_readonly_connections()
+    cutoff = now.date() if now.time() >= time(18, 30) else now.date()-timedelta(days=1)
+    days = []
     async with AsyncSessionLocal() as db:
-        await assert_readonly_session(db)
-        day = await get_most_recent_trading_day_async(db, now.date())
-    return day.isoformat() if day == now.date() else None
+        if not await assert_readonly_session(db):
+            raise RuntimeError('STRATEGY_DATABASE_READ_ONLY_PROOF_REQUIRED')
+        day = await get_most_recent_trading_day_async(db, cutoff)
+        while day is not None and (since is None or day >= since) and len(days) < limit:
+            days.append(day.isoformat())
+            day = await get_previous_trading_day_async(db, day)
+    return list(reversed(days)), bool(day and since and day >= since)
+
 
 
 def run_daily_loop():
@@ -221,26 +278,50 @@ def run_daily_loop():
 
 async def _daily_loop():
     import asyncio
-    import hashlib
-    from .job_store import enqueue
+    from time import monotonic
+
+    from .job_store import enqueue, failure_details, job_identity, recover_failed
+    from .producer import EVALUATION_PROTOCOL
+    from .release_store import resolve_active_release
+    from .runtime_status import publish_runtime_status
     jobs, root, bars, inst = _roots()
+    next_scan = 0.0
     while True:
-        if os.getenv('PANJI_STRATEGY_DAILY_SCHEDULER_ENABLED') == '1':
-            day = await scheduled_trade_day(datetime.now(ZoneInfo('Asia/Shanghai')))
-            if day:
-                from .runtime_status import publish_runtime_status
+        if os.getenv('PANJI_STRATEGY_DAILY_SCHEDULER_ENABLED') == '1' and monotonic() >= next_scan:
+            next_scan = monotonic()+60
+            checked_at = datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
+            try:
                 status = publish_runtime_status(jobs, root)
-                identity = hashlib.sha256(f'STRATEGY_AFTER_CLOSE:{day}'.encode()).hexdigest()[:32]
-                if status['can_predict']:
-                    enqueue(jobs, 'PREDICT', {'trade_date': day}, identity=identity)
+                active = resolve_active_release(root)
+                if status['can_predict'] and active:
+                    since = datetime.fromisoformat(active.get('model_activated_at', active['activated_at'])).astimezone(ZoneInfo('Asia/Shanghai')).date()
+                    days, truncated = await scheduled_trade_days(datetime.now(ZoneInfo('Asia/Shanghai')), since=since)
+                    for day in days:
+                        payload = {k:active[k] for k in ('release_id', 'bundle_sha256')}
+                        payload.update(trade_date=day, evaluation_protocol=EVALUATION_PROTOCOL)
+                        identity = job_identity('PREDICT', payload)
+                        enqueue(jobs, 'PREDICT', payload, identity=identity)
+                        recover_failed(jobs, identity)
+                    state = {'status':'CHECKED', 'checked_at':checked_at, 'trade_dates':days,
+                        'model_release_id':active['release_id'], 'backlog_exceeds_31_sessions':truncated}
+                else:
+                    state = {'status':'NOT_READY', 'checked_at':checked_at,
+                             'reason':'APPROVED_MODEL_OR_RUNTIME_REQUIRED'}
+            except Exception as exc:
+                state = {'status':'FAILED', 'checked_at':checked_at, **failure_details(exc)}
+            atomic_json(jobs/'scheduler.json', state)
         process_one()
         await asyncio.sleep(10)
 
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('command',choices=['once','daily-loop'])
+    p=argparse.ArgumentParser()
+    p.add_argument('command',choices=['once','daily-loop'])
     args=p.parse_args()
-    if args.command=='once':print(json.dumps(process_one()))
-    else:run_daily_loop()
+    if args.command=='once':
+        print(json.dumps(process_one()))
+    else:
+        run_daily_loop()
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    main()

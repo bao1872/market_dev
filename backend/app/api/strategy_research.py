@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+
 from app.services.access_control_service import AccessContext, require_capability
 from app.services.strategy_research_read_service import (
-    SnapshotInvalid, SnapshotUnavailable, evaluate, read_snapshot,
+    SnapshotInvalid,
+    SnapshotUnavailable,
+    evaluate,
+    read_snapshot,
 )
 
 router = APIRouter(prefix="/v1/strategy-research", tags=["strategy-research"])
@@ -20,6 +24,7 @@ def zigzag_evaluation(
     symbol: str | None = Query(None, min_length=3, max_length=32, pattern=r"^[A-Za-z0-9:_]+$"),
     gain_pct: float = Query(5, gt=0, le=100),
     risk_pct: float = Query(5, gt=0, le=100),
+    period: str = Query("ALL", pattern="^(ALL|TRAIN|VAL|TEST|POST_TEST|UNASSIGNED)$"),
     family: str = Query("JOINT", pattern="^(JOINT|BREAKOUT)$"),
     trend: str | None = Query(None, pattern="^(向上|向下|待确认)$"),
     release_id: str | None = Query(None, min_length=1, max_length=128),
@@ -31,7 +36,7 @@ def zigzag_evaluation(
             raise SnapshotInvalid("unsupported strategy")
         if release_id and snap["metadata"].get("release_id") != release_id:
             raise HTTPException(status_code=409, detail="评价与候选模型版本不一致")
-        return evaluate(snap, side, symbol, gain_pct, risk_pct, family=family, trend=trend)
+        return evaluate(snap, side, symbol, gain_pct, risk_pct, family=family, trend=trend, period=period)
     except SnapshotUnavailable as exc:
         # A missing research snapshot is not an empty evaluation result.
         # Match candidate snapshot availability semantics and the PRD fail-closed contract.

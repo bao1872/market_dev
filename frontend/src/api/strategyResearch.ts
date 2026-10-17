@@ -11,6 +11,8 @@ export interface ResearchMetadata {
   version: string
   generated_at: string
   evaluation_protocol: string
+  maturity_contract?: string
+  path_horizon?: number
   model_sha256: string
   data_sha256: string
   audit_ref: string
@@ -25,6 +27,8 @@ export interface ModelEvaluation {
   n_unresolved: number
   n_success: number
   success_rate: number | null
+  n_path_unresolved?: number
+  n_structure_matured?: number
   n_path: number
   joint_count: number
   joint_rate: number | null
@@ -52,6 +56,8 @@ export interface ResearchPoint {
   model_release_id?: string | null
 }
 export interface ResearchEventRow extends Omit<ResearchPoint, 'mfe_pct' | 'mae_pct'> {
+  structure_outcome?: OpportunityStatus | 'NOT_APPLICABLE'
+  path_status?: 'MATURED' | 'UNRESOLVED'
   mdd_pct: number | null
   endpoint_pct: number | null
   mfe_pct: number | null
@@ -70,7 +76,7 @@ export interface StrategyEvaluationResponse {
   table: ResearchEventRow[]
 }
 export async function getZigzagEvaluation(params: {
-  side: StrategySide; symbol?: string; release_id?: string; family?: 'JOINT' | 'BREAKOUT'; trend?: string; gain_pct: number; risk_pct: number
+  side: StrategySide; symbol?: string; release_id?: string; family?: 'JOINT' | 'BREAKOUT'; trend?: string; period?: string; gain_pct: number; risk_pct: number
 }): Promise<StrategyEvaluationResponse> {
   const { data } = await apiClient.get<StrategyEvaluationResponse>(
     '/v1/strategy-research/zigzag/evaluation', { params },

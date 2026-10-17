@@ -140,6 +140,117 @@ class FourteenIntegration(unittest.TestCase):
         self.assertEqual(rows[1]['segment']['asOf'], rows[1]['decision_date'])
         self.assertEqual(rows[0]['breakout']['trend_at_breakout'], rows[1]['breakout']['trend_at_breakout'])
 
+    def test_native_qfq_model_and_snapshot_publish_through_same_pointer_owner(self):
+        import contextlib
+        import io
+        import shutil
+        from types import SimpleNamespace
+        from app.strategy_integration.fourteen_adapter import verify_production_package
+        from app.strategy_integration.partitioned_build import build
+        from app.strategy_integration.release_store import atomic_json, activate_batch, digest_path, resolve_active_release
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(folder)
+            package = root/'model'
+            shutil.copytree(PACKAGE,package,ignore=shutil.ignore_patterns('__pycache__'))
+            manifest = json.loads((package/'manifest.json').read_text())
+            manifest['price_input_contract'] = 'QFQ_ASOF_V1'
+            atomic_json(package/'manifest.json',manifest)
+            sha = digest_path(package/'manifest.json')
+            verify_production_package(package,sha)
+            bundle, facts = load_package(package,sha)
+            release_id = producer.release_id_for(sha)
+            snapshots = root/'snapshots'
+            from app.strategy_integration import cli
+            args = SimpleNamespace(as_of=str(self.raw.datetime.iloc[-1].date()),chart_bars=90,
+                output_dir=snapshots,assets=PACKAGE,candidate_bundle=package,candidate_sha=sha,
+                personal_registry=None,max_symbols=1,expected_active_release_id=release_id,
+                expected_active_bundle_sha='0'*64)
+            with patch.object(cli,'_load_market',side_effect=AssertionError('must reject changed model before market reads')):
+                with self.assertRaisesRegex(producer.ProducerError,'PINNED_MODEL_CHANGED'):
+                    cli.build(args)
+            args.expected_active_bundle_sha = sha
+            with patch.object(cli,'_load_market',return_value=({'SH:600000':self.raw},None,{'source_sha256':'f'*64})):
+                result = cli.build(args)
+            # Pure temporary-filesystem publication contract, not a production approval.
+            activate_batch(snapshots,Path(result['output']))
+            active = resolve_active_release(snapshots)
+            self.assertEqual(active['bundle_sha256'],sha)
+            self.assertEqual(active['release_id'],release_id)
+            self.assertEqual(Path(active['batch']), (snapshots/'current').resolve())
+
+    def test_lab_golden_verifier_accepts_parity_and_rejects_changed_score(self):
+        import shutil
+        from app.strategy_integration.lab_delivery import verify_golden
+        from app.strategy_integration.release_store import atomic_json, digest_path
+        runtime = self.bundle['fourteen_runtime']
+        cases, seen = [], set()
+        for end in range(21, len(self.raw)+1):
+            bars = json.loads(self.raw.iloc[:end].to_json(orient='records', date_format='iso'))
+            raw = runtime.prepare(pd.DataFrame(bars))
+            day = str(raw.datetime.iloc[-1].date())
+            expected = runtime.score(raw, day)
+            tasks = {v['task'] for v in expected['signals']}
+            if tasks - seen:
+                _, snap, _ = runtime.engine.replay(raw)
+                _, features = runtime.engine.features(raw, snap, [len(raw)-1])
+                values = [[float(x) if np.isfinite(x) else None for x in row] for row in features]
+                cases.append(dict(bars=bars, as_of=day, features=values, expected=expected))
+                seen.update(tasks)
+        self.assertEqual(seen, set(runtime.manifest['models']))
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)/'package'
+            shutil.copytree(PACKAGE, root, ignore=shutil.ignore_patterns('__pycache__'))
+            windows = {'train':['2024-01-01','2025-12-31'], 'val':['2026-01-01','2026-06-30'], 'test':['2026-07-01','2026-09-30']}
+            manifest = {**runtime.manifest, 'price_input_contract':'QFQ_ASOF_V1', 'split_windows':windows}
+            atomic_json(root/'manifest.json',manifest)
+            sha = digest_path(root/'manifest.json')
+            atomic_json(root/'golden_cases.json',cases)
+            atomic_json(root/'validation_report.json', {'windows':{k:dict(start=v[0],end=v[1]) for k,v in windows.items()},
+                'tasks':{task:{split:dict(n=100,precision=.5,recall=.5,auc=.6) for split in windows} for task in manifest['models']}})
+            approval = dict(schema='PANJI_LAB_DELIVERY_V1',manifest_sha256=sha,lab_revision='c'*40,approved_for_production=True,
+                files={name:digest_path(root/name) for name in ('golden_cases.json','validation_report.json')})
+            atomic_json(root/'delivery.json',approval)
+            self.assertEqual(verify_golden(root,sha)['status'],'GOLDEN_VERIFIED')
+            cases[0]['expected']['signals'][0]['score'] += .01
+            atomic_json(root/'golden_cases.json',cases)
+            approval['files']['golden_cases.json'] = digest_path(root/'golden_cases.json')
+            atomic_json(root/'delivery.json',approval)
+            with self.assertRaises(AssertionError):
+                verify_golden(root,sha)
+
+    def test_partitioned_failure_resumes_only_verified_exact_input_stock(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from app.strategy_integration.partitioned_build import build
+        args = SimpleNamespace(as_of=str(self.raw.datetime.iloc[-1].date()), chart_bars=90)
+        runtime = self.bundle['fourteen_runtime']
+        original = producer.make_snapshots
+        calls = []
+        def interrupt(frames, *a, **kw):
+            calls.extend(frames)
+            if len(calls) == 2:
+                raise RuntimeError('injected interruption after first stock')
+            return original(frames, *a, **kw)
+        with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
+            kwargs = dict(out=Path(folder), frames={'SH:600000':self.raw,'SZ:000001':self.raw},
+                pit_source=None, source_report={'source_sha256':'f'*64}, fmod=runtime.engine,
+                bundle=self.bundle, facts=self.facts, bundle_path=str(PACKAGE),
+                bundle_origin='SYNTHETIC_DIAGNOSTIC', assets={}, release_id='a'*64, windows={'windows':{}})
+            with patch.object(producer,'make_snapshots',side_effect=interrupt):
+                with self.assertRaisesRegex(RuntimeError,'injected interruption'):
+                    build(args, **kwargs)
+            self.assertEqual(calls, ['SH:600000','SZ:000001'])
+            calls.clear()
+            def resumed(frames, *a, **kw):
+                calls.extend(frames)
+                return original(frames, *a, **kw)
+            with patch.object(producer,'make_snapshots',side_effect=resumed):
+                result = build(args, **kwargs)
+            self.assertEqual(calls, ['SZ:000001'])
+            self.assertTrue(Path(result['output']).is_dir())
+            self.assertEqual(list((Path(folder)/'.strategy-checkpoints').iterdir()), [])
+
     def test_partitioned_build_consumes_the_same_production_readers(self):
         import contextlib
         import io

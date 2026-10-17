@@ -38,10 +38,26 @@ def verify_package(path, pinned_sha=None):
     return manifest, sha
 
 
+def verify_runtime_contract(manifest):
+    """A model delivery may replace weights, never the executable feature/label owner."""
+    trusted = json.loads((PACKAGE/'manifest.json').read_text())
+    for name in ('runtime.py', 'feature_engine.py', '__init__.py', 'requirements.txt'):
+        if manifest['files'].get(name) != trusted['files'][name]:
+            raise ValueError('UNAPPROVED_DELIVERY_RUNTIME:' + name)
+    if manifest.get('runtime_versions') != trusted['runtime_versions']:
+        raise ValueError('UNAPPROVED_DELIVERY_DEPENDENCIES')
+    if manifest.get('feature_columns') != trusted['feature_columns']:
+        raise ValueError('UNAPPROVED_DELIVERY_FEATURES')
+    for task, info in manifest['models'].items():
+        if any(info.get(k) != trusted['models'][task].get(k) for k in ('target', 'condition')):
+            raise ValueError('UNAPPROVED_DELIVERY_LABEL:' + task)
+
+
 def load_package(path: Path = PACKAGE, pinned_sha: str | None = None):
     from .fourteen import FourteenModels
     path = Path(path)
     manifest, sha = verify_package(path, pinned_sha)
+    verify_runtime_contract(manifest)
     runtime = FourteenModels(path)
     if runtime.manifest['schema'] != 'PANJI_FOURTEEN_PORTABLE_V1':
         raise ValueError('FOURTEEN_SCHEMA_MISMATCH')
@@ -58,10 +74,22 @@ def is_package(path: Path) -> bool:
     return path.is_dir() and (path / 'manifest.json').is_file() and (path / 'runtime.py').is_file()
 
 
+def verify_production_package(path, pinned_sha):
+    if (not isinstance(pinned_sha, str) or len(pinned_sha) != 64
+            or any(c not in '0123456789abcdef' for c in pinned_sha) or not is_package(Path(path))):
+        raise ValueError('PRODUCTION_FOURTEEN_PACKAGE_REQUIRED')
+    manifest, sha = verify_package(path, pinned_sha)
+    verify_runtime_contract(manifest)
+    if manifest.get('price_input_contract') != 'QFQ_ASOF_V1':
+        raise ValueError('PRODUCTION_PRICE_CONTRACT_REQUIRED')
+    return manifest, sha
+
+
 def build_stock(raw, symbol, bundle, *, release_id, chart_bars, pit_source=None):
+    from app.services.strategy_tv_zigzag import overlay
+
     from . import model
     from .breakout import event_identity, observe_breakout
-    from app.services.strategy_tv_zigzag import overlay
     runtime = bundle['fourteen_runtime']
     start = max(0, len(raw) - chart_bars)
     bars = [{'date': str(pd.Timestamp(r.datetime).date()), 'open': float(r.open),

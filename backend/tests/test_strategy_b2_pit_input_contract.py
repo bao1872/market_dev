@@ -90,6 +90,9 @@ def test_missing_factor_coverage_excludes_instrument_without_synthesis(monkeypat
 
 
 def test_db_session_is_open_during_all_canonical_reads(monkeypatch):
+    # INVALID_FIXTURE after fail-closed source gate: model an explicitly read-only session.
+    monkeypatch.setenv('PANJI_STRATEGY_READ_ONLY_DATABASE', '1')
+    monkeypatch.setattr('app.strategy_integration.readonly_runtime._installed', True)
     class FakeContext:
         def __init__(self):
             self.closed = False
@@ -101,6 +104,8 @@ def test_db_session_is_open_during_all_canonical_reads(monkeypatch):
         async def execute(self, *_args, **_kwargs):
             assert not self.closed
             self.calls += 1
+            if str(_args[0]) == 'SHOW transaction_read_only':
+                return SimpleNamespace(scalar_one=lambda:'on')
             return SimpleNamespace(all=lambda: [SimpleNamespace(
                 id=101, market='SH', symbol='600000')])
 
@@ -115,7 +120,7 @@ def test_db_session_is_open_during_all_canonical_reads(monkeypatch):
     monkeypatch.setattr(de, 'load_official_qfq_stock_batch', fake_reader)
     accepted, report = asyncio.run(de.read_official_qfq_stock_batch(date(2026, 1, 6)))
     assert ctx.closed
-    assert ctx.calls == 1
+    assert ctx.calls == 2
     assert observed == [(True, {101: 'SH:600000'}, date(2026, 1, 6))]
     assert list(accepted) == ['SH:600000']
     assert report['read_only'] is True

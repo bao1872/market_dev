@@ -19,7 +19,8 @@ def test_admin_write_controls_fail_closed_before_deploy(monkeypatch):
     req={'as_of':'2026-10-16','train':{'start':'2024-01-01','end':'2025-12-31'},
          'val':{'start':'2026-01-01','end':'2026-06-30'},
          'test':{'start':'2026-07-01','end':'2026-09-30'},'trees':300}
-    assert client.post('/v1/admin/strategy-research/zigzag/train/preview',json=req).status_code==200
+    # STALE_TEST: production research preview is now explicitly retired.
+    assert client.post('/v1/admin/strategy-research/zigzag/train/preview',json=req).status_code==410
     assert client.post('/v1/admin/strategy-research/zigzag/train-runs',json=req).status_code==503
     app.dependency_overrides[require_authenticated]=lambda:ctx(False)
     assert client.post('/v1/admin/strategy-research/zigzag/train-runs',json=req).status_code==403

@@ -56,7 +56,8 @@ def test_http_preview_and_training_are_fail_closed(monkeypatch):
     app=FastAPI();app.include_router(admin.router)
     app.dependency_overrides[require_authenticated]=lambda:ctx()
     client=TestClient(app)
-    assert client.post('/v1/admin/strategy-research/zigzag/train/preview',json=cfg()).status_code==200
+    # STALE_TEST: production research preview is now explicitly retired.
+    assert client.post('/v1/admin/strategy-research/zigzag/train/preview',json=cfg()).status_code==410
     assert client.post('/v1/admin/strategy-research/zigzag/train-runs',json=cfg()).status_code==503
     mismatch=cfg();mismatch['test']['end']='2026-08-31'
     assert client.post('/v1/admin/strategy-research/zigzag/train-runs',json=mismatch).status_code==422

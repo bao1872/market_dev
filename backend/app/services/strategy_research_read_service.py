@@ -12,8 +12,14 @@ import math
 import os
 from functools import lru_cache
 from pathlib import Path
-from statistics import median
 from typing import Any
+
+from app.strategy_integration.evaluation_contract import (
+    MATURITY_CONTRACT,
+    PATH_HORIZON,
+    PERIODS,
+    signal_period,
+)
 
 SCHEMA = "panji-strategy-evaluation-v1"
 MAX_BYTES = 96 * 1024 * 1024
@@ -22,11 +28,11 @@ KINDS = {"BUY", "SELL"}
 OUTCOMES = {"SUCCESS", "FAIL", "UNRESOLVED"}
 
 
-class SnapshotUnavailable(Exception):
+class SnapshotUnavailable(Exception):  # noqa: N818 - stable reader API
     """Snapshot not configured or does not exist."""
 
 
-class SnapshotInvalid(Exception):
+class SnapshotInvalid(Exception):  # noqa: N818 - stable reader API
     """Untrusted, incomplete or corrupt snapshot; fail closed."""
 
 
@@ -61,6 +67,11 @@ def _check_snapshot(blob: Any) -> dict[str, Any]:
         raise SnapshotInvalid("event limit exceeded")
     if not models or len(models) > 20:
         raise SnapshotInvalid("model count out of bounds")
+    independent = meta.get('maturity_contract') == MATURITY_CONTRACT
+    if meta.get('maturity_contract') is not None and not independent:
+        raise SnapshotInvalid('unknown maturity contract')
+    if independent and meta.get('path_horizon') != PATH_HORIZON:
+        raise SnapshotInvalid('invalid path horizon')
     ids: set[str] = set()
     for m in models:
         if not isinstance(m, dict) or not isinstance(m.get("id"), str) or not m.get("name") or m.get("side") not in KINDS:
@@ -96,10 +107,33 @@ def _check_snapshot(blob: Any) -> dict[str, Any]:
                 raise SnapshotInvalid("event stage/decision date does not match signal time")
         for name in ("endpoint_pct", "mfe_pct", "mae_pct", "mdd_pct"):
             _optional_number(row, name, min_value=(0 if name in ("mae_pct", "mdd_pct") else None))
-        if row["outcome"] == "UNRESOLVED" and any(row.get(k) is not None for k in ("endpoint_pct", "mfe_pct", "mae_pct", "mdd_pct")):
-            raise SnapshotInvalid("unresolved events cannot carry ex-post metrics")
-        if row["outcome"] != "UNRESOLVED" and (row.get("mfe_pct") is None or row.get("mae_pct") is None):
-            raise SnapshotInvalid("resolved event missing MFE/MAE")
+        if independent:
+            if row.get('period') is not None:
+                try:
+                    expected_period = signal_period(row['signal_time'][:10], meta.get('split_windows'))
+                except ValueError as exc:
+                    raise SnapshotInvalid(str(exc)) from exc
+                if row['period'] not in PERIODS or row['period'] != expected_period:
+                    raise SnapshotInvalid('event evaluation period mismatch')
+            family = row.get('family', 'JOINT')
+            if family not in ('JOINT','BREAKOUT') or family != ref_model.get('family','JOINT'):
+                raise SnapshotInvalid('event family mismatch')
+            if family == 'BREAKOUT' and row.get('structure_outcome') != 'NOT_APPLICABLE':
+                raise SnapshotInvalid('breakout has no structural outcome')
+            if row.get('structure_outcome') not in OUTCOMES | {'NOT_APPLICABLE'} or row.get('path_status') not in ('MATURED','UNRESOLVED'):
+                raise SnapshotInvalid('independent maturity statuses required')
+            if row.get('family','JOINT') == 'JOINT' and row['structure_outcome'] != row['outcome']:
+                raise SnapshotInvalid('joint structure outcome mismatch')
+            fields = ('endpoint_pct','mfe_pct','mae_pct','mdd_pct','path')
+            if row['path_status'] == 'UNRESOLVED' and any(row.get(k) is not None for k in fields):
+                raise SnapshotInvalid('unmatured path carries metrics')
+            if row['path_status'] == 'MATURED' and (any(row.get(k) is None for k in fields) or not isinstance(row['path'],list) or len(row['path']) != meta['path_horizon']):
+                raise SnapshotInvalid('matured path incomplete')
+        else:
+            if row['outcome'] == 'UNRESOLVED' and any(row.get(k) is not None for k in ('endpoint_pct','mfe_pct','mae_pct','mdd_pct')):
+                raise SnapshotInvalid('unresolved events cannot carry ex-post metrics')
+            if row['outcome'] != 'UNRESOLVED' and (row.get('mfe_pct') is None or row.get('mae_pct') is None):
+                raise SnapshotInvalid('resolved event missing MFE/MAE')
         path = row.get("path")
         if path is not None:
             if not isinstance(path, list) or len(path) > 500:
@@ -130,7 +164,8 @@ def _load_cached(filepath: str, mtime_ns: int, size: int) -> dict[str, Any]:
         if len(payload) > MAX_BYTES:
             raise SnapshotInvalid("snapshot too large")
         blob = json.loads(payload)
-        from .strategy_partitioned_snapshot import SCHEMA as PARTITIONED, read_evaluation
+        from .strategy_partitioned_snapshot import SCHEMA as PARTITIONED
+        from .strategy_partitioned_snapshot import read_evaluation
         if isinstance(blob, dict) and blob.get('schema') == PARTITIONED:
             try:
                 return read_evaluation(Path(filepath))
@@ -196,7 +231,9 @@ def _touch_order(path: list[dict[str, float]] | None, gain: float, risk: float) 
     return "NEITHER"
 
 
-def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: float, risk: float, *, family: str = "JOINT", trend: str | None = None) -> dict[str, Any]:
+def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: float, risk: float, *, family: str = "JOINT", trend: str | None = None, period: str = "ALL") -> dict[str, Any]:
+    if period not in ('ALL','TRAIN','VAL','TEST','POST_TEST','UNASSIGNED'):
+        raise ValueError('invalid evaluation period')
     if side not in KINDS:
         raise ValueError("invalid side")
     _number(gain, "gain", min_value=.01)
@@ -208,7 +245,7 @@ def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: floa
     cohort = snapshot['events']
     if hasattr(cohort, 'select_symbol'):
         cohort = cohort.select_symbol(symbol)
-    rows = [e for e in cohort if e["model_id"] in model_ids and e["side"] == side and (symbol is None or e["symbol"] == symbol) and (trend is None or e.get("trend_at_event") == trend or (trend == "待确认" and e.get("trend_at_event") is None))]
+    rows = [e for e in cohort if (period == "ALL" or e.get("period", "UNASSIGNED") == period) and e["model_id"] in model_ids and e["side"] == side and (symbol is None or e["symbol"] == symbol) and (trend is None or e.get("trend_at_event") == trend or (trend == "待确认" and e.get("trend_at_event") is None))]
     results = []
     points = []
     table = []
@@ -217,11 +254,11 @@ def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: floa
             continue
         one = [e for e in rows if e["model_id"] == m["id"]]
         resolved = [e for e in one if e["outcome"] != "UNRESOLVED"]
-        valid = [e for e in resolved if e.get("mfe_pct") is not None and e.get("mae_pct") is not None]
+        valid = [e for e in one if (e.get('path_status') == 'MATURED' if snapshot['metadata'].get('maturity_contract') else e['outcome'] != 'UNRESOLVED') and e.get('mfe_pct') is not None and e.get('mae_pct') is not None]
         success = sum(e["outcome"] == "SUCCESS" for e in resolved)
         joint = sum(e["mfe_pct"] >= gain and e["mae_pct"] <= risk for e in valid)
-        metrics = {k: [float(e[k]) for e in resolved if e.get(k) is not None] for k in ("endpoint_pct", "mfe_pct", "mae_pct", "mdd_pct")}
-        orders = [_touch_order(e.get("path"), gain, risk) for e in resolved]
+        metrics = {k: [float(e[k]) for e in valid if e.get(k) is not None] for k in ("endpoint_pct", "mfe_pct", "mae_pct", "mdd_pct")}
+        orders = [_touch_order(e.get("path"), gain, risk) for e in valid]
         # Stable, uniform sample by source order; never describe scatter sample as the full population.
         stride = max(1, math.ceil(len(valid) / 550))
         for e in valid[::stride][:550]:
@@ -230,7 +267,9 @@ def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: floa
             "model_id": m["id"], "model_name": m["name"], "n_signals": len(one),
             "n_resolved": len(resolved), "n_unresolved": len(one) - len(resolved),
             "n_success": success, "success_rate": round(success / len(resolved), 6) if resolved else None,
-            "n_path": len(valid), "joint_count": joint,
+            "n_path": len(valid), "n_path_unresolved": len(one)-len(valid),
+            "n_structure_matured": sum(e.get('structure_outcome',e['outcome']) in ('SUCCESS','FAIL') for e in one),
+            "joint_count": joint,
             "joint_rate": round(joint / len(valid), 6) if valid else None,
             "endpoint_p50": _quantile(metrics["endpoint_pct"], .5),
             "mfe_p50": _quantile(metrics["mfe_pct"], .5),
@@ -241,10 +280,10 @@ def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: floa
             "distributions": {k: _hist(v) for k, v in metrics.items()},
         })
         for e in sorted(one, key=lambda x: (x["signal_time"], x["event_id"]), reverse=True)[:80]:
-            table.append({k: e.get(k) for k in ("event_id", "model_id", "symbol", "signal_time", "outcome", "mfe_pct", "mae_pct", "mdd_pct", "endpoint_pct", "candidate_id", "observation_id", "stage", "decision_date", "model_release_id")})
+            table.append({k: e.get(k) for k in ("event_id", "model_id", "symbol", "signal_time", "outcome", "mfe_pct", "mae_pct", "mdd_pct", "endpoint_pct", "candidate_id", "observation_id", "stage", "decision_date", "model_release_id", "structure_outcome", "path_status", "period")})
     table.sort(key=lambda e: (e["signal_time"], e["model_id"], e["event_id"]), reverse=True)
     return {
-        "metadata": snapshot["metadata"], "side": side, "symbol": symbol, "family": family, "trend": trend,
+        "metadata": snapshot["metadata"], "side": side, "symbol": symbol, "family": family, "trend": trend, "period":period,
         "gain_pct": gain, "risk_pct": risk,
         "models": results, "points": points,
         "n_unique_events": len({(r["symbol"], r["event_id"]) for r in rows}),

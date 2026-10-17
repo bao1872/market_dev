@@ -54,19 +54,19 @@ export default function StrategyResearchPage() {
     <header className="headline">
       <div>
         <div className="eyebrow">PANJI / STRATEGY RESEARCH</div>
-        <h1>策略研究中心 <span className="tag gray">五类互补 · 全市场统一模型</span></h1>
+        <h1>策略中心 <span className="tag gray">五类互补 · 全市场统一模型</span></h1>
         <div className="subtitle">一只股票、一张K线，同时看到买入与卖出候选；每个点可追溯 D0 / L1 / L2 评分、决策时点与分任务性能。</div>
       </div>
       <div className="header-actions">
         <span className="tag green">仅展示已发布版本</span>
-        {admin && <button type="button" className="btn primary" onClick={() => navigateTab('management')}>模型管理 / 手动训练</button>}
+        {admin && <button type="button" className="btn primary" onClick={() => navigateTab('management')}>模型与运行管理</button>}
       </div>
     </header>
     <div className="head-meta">
       <span className="meta">策略 <b>ZigZag · 两层机会识别</b></span>
       <span className="meta">当前个股 <b>{symbol}</b></span>
       <span className="meta">数据来源 <b>权威接口 · 未发布则空态</b></span>
-      <span className="meta">模型输出 <b>L1 / L2 分数，非校准概率</b></span>
+      <span className="meta">模型输出 <b>D0 / L1 / L2 分数，非校准概率</b></span>
     </div>
     <nav className="tabs" aria-label="策略子页面">
       {([['stock', '个股', '01'], ['evaluation', '历史评价', '02'], ['today', '当日候选', '03'], ['management', '模型管理', '04']] as const)
