@@ -27,7 +27,7 @@ def build(args, *, out, frames, pit_source, source_report, fmod, bundle, facts,
         'release_id': release_id, 'as_of': args.as_of,
         'source_sha256': source_report['source_sha256'],
         'evaluation_protocol': producer.EVALUATION_PROTOCOL,
-        'history_bars': args.chart_bars, 'tv_sha256': tv_identity(),
+        'history_bars': args.chart_bars, 'diagnostic_max_symbols':args.max_symbols, 'tv_sha256': tv_identity(),
         'computation_sha256': computation_sha, 'lab_delivery': facts.get('lab_delivery'),
     }, sort_keys=True).encode()).hexdigest()
     destination = out/(args.as_of+'_'+batch_id[:16])
@@ -113,7 +113,7 @@ def _assemble(args, *, staging, destination, checkpoint, batch_id, frames, pit_s
     atomic_bytes(staging/'evaluation_snapshot.json', transport.encode(descriptor))
     validation = transport.validate_publication(staging/'candidate_snapshot.json')
     manifest = {'status': 'VALIDATED_STAGING_NOT_DEPLOYED', 'release_id': release_id, 'batch_id': batch_id,
-        'as_of': args.as_of, 'evaluation_protocol': producer.EVALUATION_PROTOCOL,
+        'as_of': args.as_of, 'diagnostic_max_symbols':args.max_symbols, 'evaluation_protocol': producer.EVALUATION_PROTOCOL,
         'source_sha256': source_report['source_sha256'],
         'candidate_sha256': hashlib.sha256((staging/'candidate_snapshot.json').read_bytes()).hexdigest(),
         'evaluation_sha256': hashlib.sha256((staging/'evaluation_snapshot.json').read_bytes()).hexdigest(),

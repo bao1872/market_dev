@@ -178,8 +178,9 @@ def task_samples(raw, stock, engine, symbol, *, pit_source=None, split_windows=N
             if o.get('scoring_status') == 'CANDIDATE_INACTIVE':
                 continue
             t = days[o['decision_date']]
-            period = next((name.upper() for name, bounds in (split_windows or {}).items() if bounds[0] <= o['decision_date'] <= bounds[1]), 'UNASSIGNED')
-            if period != 'UNASSIGNED':
+            from .evaluation_contract import signal_period
+            period = signal_period(o['decision_date'], split_windows)
+            if period in ('TRAIN', 'VAL', 'TEST'):
                 bounds = split_windows[period.lower()]
                 if period not in oracle_cache:
                     cutoff = max(i for day, i in days.items() if day <= bounds[1])

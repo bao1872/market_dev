@@ -1,3 +1,4 @@
+import { strategyPreviewParams } from './strategyPreview'
 /** Public read contracts for externally audited, never synthetic strategy data. */
 import { apiClient } from './client'
 export type Stage = 'D0' | 'D1' | 'D2' | 'D3'
@@ -64,7 +65,7 @@ export interface StrategyHistory {
 }
 export async function getStrategyHistory(symbol:string,limit=500):Promise<StrategyHistory> {
   const {data}=await apiClient.get<StrategyHistory>(
-    `/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/bars`,{params:{limit,include_structure:true}})
+    `/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/bars`,{params:{limit,include_structure:true,...strategyPreviewParams()}})
   return data
 }
 export interface DailyRow {
@@ -77,11 +78,11 @@ export interface DailyResult { trade_date: string; release_id: string; status: '
 export async function getStockResearch(symbol: string, releaseId?: string): Promise<StockResearch> {
   const { data } = await apiClient.get<StockResearch>(
     `/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/candidates`,
-    { params: releaseId ? { release_id: releaseId } : undefined },
+    { params: {...strategyPreviewParams(), ...(releaseId ? {release_id:releaseId} : {})} },
   )
   return data
 }
 export async function getDailyResearch(): Promise<DailyResult> {
-  const { data } = await apiClient.get<DailyResult>('/v1/strategy-research/daily')
+  const { data } = await apiClient.get<DailyResult>('/v1/strategy-research/daily', {params:strategyPreviewParams()})
   return data
 }

@@ -1,3 +1,4 @@
+import { strategyPreviewParams } from './strategyPreview'
 // S1: read-only evaluation API. No frontend success/risk recomputation.
 import { apiClient } from './client'
 
@@ -79,7 +80,7 @@ export async function getZigzagEvaluation(params: {
   side: StrategySide; symbol?: string; release_id?: string; family?: 'JOINT' | 'BREAKOUT'; trend?: string; period?: string; gain_pct: number; risk_pct: number
 }): Promise<StrategyEvaluationResponse> {
   const { data } = await apiClient.get<StrategyEvaluationResponse>(
-    '/v1/strategy-research/zigzag/evaluation', { params },
+    '/v1/strategy-research/zigzag/evaluation', { params: {...params,...strategyPreviewParams()} },
   )
   return data
 }
@@ -98,6 +99,6 @@ export interface TaskPerformance {
   trend: {status: 'AVAILABLE' | 'UNAVAILABLE'; protocol?: string; tasks: TaskPerformance['tasks']; coverage: {missing_context?: number; endpoint_mismatch?: number; matched?: number}}
 }
 export async function getTaskPerformance(params: {symbol?: string; period: string; release_id?: string}): Promise<TaskPerformance> {
-  const {data} = await apiClient.get<TaskPerformance>('/v1/strategy-research/zigzag/task-performance', {params})
+  const {data} = await apiClient.get<TaskPerformance>('/v1/strategy-research/zigzag/task-performance', {params:{...params,...strategyPreviewParams()}})
   return data
 }

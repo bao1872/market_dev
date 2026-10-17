@@ -56,7 +56,7 @@ def validate_samples(samples):
                     or len(context['algorithm_sha']) != 64
                     or any(c not in '0123456789abcdef' for c in context['algorithm_sha'])):
                 raise ValueError('invalid trend context')
-        if row.get('period') not in ('TRAIN', 'VAL', 'TEST', 'UNASSIGNED'):
+        if row.get('period') not in ('TRAIN', 'VAL', 'TEST', 'POST_TEST', 'UNASSIGNED'):
             raise ValueError('invalid task split')
     return samples
 

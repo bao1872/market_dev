@@ -159,3 +159,13 @@ def test_chunk_resume_and_proxy_sized_requests(delivery, tmp_path):
     assert receive_chunk(target,chunks[-1],sha,len(chunks)-1,len(payload)) == result
     with pytest.raises(ValueError,match='ARCHIVE_CHANGED'):
         receive_chunk(target,bad,sha,0,len(payload))
+
+
+def test_unapproved_delivery_can_be_evaluated_without_production_approval(delivery):
+    root, sha = delivery
+    path = root/'delivery.json'
+    approval = json.loads(path.read_text())
+    approval['approved_for_production'] = False
+    path.write_bytes(encode(approval))
+    _, actual, _ = validate_delivery(root, sha)
+    assert actual['approved_for_production'] is False

@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -43,6 +44,7 @@ export default function UnifiedManagementView() {
       <input className="field" type="date" aria-label="交付评价交易日" value={predictionDate} onChange={e=>setPredictionDate(e.target.value)} />
       <button className="btn primary" disabled={busy || !deliveryFile || !/^[0-9a-f]{64}$/.test(manifestSha) || !predictionDate || !runtime.data?.can_validate_delivery} onClick={()=>run(async()=>{const result=await receiveLabDelivery(deliveryFile!,manifestSha,predictionDate);setJobId(result.job_id);return `交付已接收，验证任务 ${result.job_id}；未激活。`})}>接收并验证</button></div>
     </div></div>
+    {releases.data?.installed_models?.map(model=><div className="notice" key={model.manifest_sha256 ?? model.status}>已安装模型：{model.version ?? '身份不可用'} · {model.model_count ?? 0} 任务 · {model.status}<div className="inline-code">{model.manifest_sha256}</div><div>输入合同：{model.price_input_contract ?? '未验证'}；{model.blockers.length ? `待处理：${model.blockers.join('、')}` : '文件完整性已核对，仍需交付验证与评价'}</div></div>)}
     <div className="admin-grid">
       <div className="panel"><div className="panel-head"><div><h2>当前正式模型</h2><div className="hint">保留唯一现役身份；待验收及回滚记录在下方受控流程中查看</div></div><span className="tag green">人工审核</span></div>
         <div className="panel-body">
@@ -56,7 +58,7 @@ export default function UnifiedManagementView() {
               {releases.data.releases.map(release => <tr key={release.release_id ?? release.bundle_sha256}>
                 <td className="inline-code">{release.release_id ?? '—'}</td><td className="inline-code">{release.bundle_sha256?.slice(0, 14) ?? '—'}</td>
                 <td>{release.label_contract ?? '—'}</td><td><span className="tag gray">{release.status ?? '未知'}</span>{!release.production_eligible && <span className="hint">历史记录，仅供追溯</span>}<div className="inline-code">评价：{release.evaluation_sha256 ?? '未生成'}</div></td>
-                <td>{release.status === 'VALIDATED_STAGING_NOT_DEPLOYED' && <button className="btn tiny" type="button" disabled={busy || !release.production_eligible || !validSha || reportSha !== release.evaluation_sha256 || !release.release_id} onClick={() =>
+                <td>{release.batch_id && <Link className="btn tiny" to={`/strategy?tab=stock&preview_batch=${release.batch_id}`}>预览本批次</Link>}{release.status === 'VALIDATED_STAGING_NOT_DEPLOYED' && <button className="btn tiny" type="button" disabled={busy || !release.production_eligible || !validSha || reportSha !== release.evaluation_sha256 || !release.release_id} onClick={() =>
                   run(async () => { const result = await auditModelRelease(release.release_id!, reportSha); await releases.refetch(); return `人工审核结果：${result.status}` })}>确认评价并审核</button>}
                   <button className="btn tiny" type="button" disabled={busy || !release.production_eligible || !validSha || release.status !== 'AUDITED' || !release.release_id} onClick={() =>
                   run(async () => { const result = await activateModelRelease(release.release_id!, reportSha); await releases.refetch(); await runtime.refetch(); return `后端返回模型发布状态：${result.status}` })}>激活 / 回滚</button></td>

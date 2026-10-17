@@ -1,3 +1,4 @@
+import { strategyPreviewKey } from '@/api/strategyPreview'
 import { useMemo, useState } from 'react'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { getDailyResearch, getStrategyHistory, type DailyRow } from '@/api/strategyCandidates'
@@ -23,7 +24,7 @@ export default function UnifiedTodayView({ focus }: {
   const [trendFilter, setTrendFilter] = useState('ALL')
   const [filter, setFilter] = useState('')
   const [page, setPage] = useState(0)
-  const query = useQuery({ queryKey: ['strategy-research', 'daily'], queryFn: getDailyResearch, retry: false, staleTime: 120000 })
+  const query = useQuery({ queryKey: [strategyPreviewKey(), 'strategy-research', 'daily'], queryFn: getDailyResearch, retry: false, staleTime: 120000 })
   const batch = query.data
   const filtered = useMemo(() => batch?.items.filter(row =>
     (kind === 'ALL' || row.kind === kind) &&
@@ -39,7 +40,7 @@ export default function UnifiedTodayView({ focus }: {
   // Bounded per-page read-only MDAS data access; never N queries for the entire market.
   // React Query caches by symbol and avoids requests for hidden rows.
   const historyQueries = useQueries({ queries: visibleSymbols.map(symbol => ({
-    queryKey: ['strategy-research', 'segment-mdas', symbol, batch?.trade_date],
+    queryKey: [strategyPreviewKey(), 'strategy-research', 'segment-mdas', symbol, batch?.trade_date],
     queryFn: () => getStrategyHistory(symbol, 240),
     enabled: batch?.status === 'PUBLISHED', staleTime: 120000, retry: false,
   })) })

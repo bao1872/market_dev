@@ -1,3 +1,4 @@
+import { strategyPreviewKey } from '@/api/strategyPreview'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
@@ -39,7 +40,7 @@ export default function UnifiedEvaluationView({ currentSymbol, embedded = false,
   }, [gain, risk])
   const validSymbol = /^(SH|SZ|BJ):\d{6}$/.test(currentSymbol)
   const query = useQuery({
-    queryKey: ['strategy-research', 'zigzag', releaseId, period, side, scope === 'stock' ? currentSymbol : null, applied.gain, applied.risk],
+    queryKey: [strategyPreviewKey(), 'strategy-research', 'zigzag', releaseId, period, side, scope === 'stock' ? currentSymbol : null, applied.gain, applied.risk],
     queryFn: () => getZigzagEvaluation({ side, period, release_id: releaseId, symbol: scope === 'stock' ? currentSymbol : undefined, gain_pct: applied.gain, risk_pct: applied.risk }),
     enabled: scope === 'market' || validSymbol,
     staleTime: 120000,

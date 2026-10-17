@@ -21,7 +21,7 @@ ZIP 根目录直接放置现有 `PANJI_FOURTEEN_PORTABLE_V1` 包，不增加外�
 - `schema`: `PANJI_LAB_DELIVERY_V1`。
 - `manifest_sha256`: manifest 文件原始字节 SHA256，必须与管理员独立填写的摘要相同。
 - `lab_revision`: lab 的 40 位 Git SHA 或 64 位内容身份。
-- `approved_for_production`: 必须为 true；这是 lab 交付声明，不替代生产人工激活。
+- `approved_for_production`: 必须是布尔值。false 允许执行候选迁移评价和管理员预览；只有 true 才允许进入生产人工审核。未批准交付不能激活。
 - `files`: `validation_report.json`、`golden_cases.json` 原始字节 SHA256。
 
 同一 manifest 身份不能替换批准声明或证据；需要保留原交付，不能静默覆盖。

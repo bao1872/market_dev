@@ -140,7 +140,7 @@ class FourteenIntegration(unittest.TestCase):
         self.assertEqual(rows[1]['segment']['asOf'], rows[1]['decision_date'])
         self.assertEqual(rows[0]['breakout']['trend_at_breakout'], rows[1]['breakout']['trend_at_breakout'])
 
-    def test_native_qfq_model_and_snapshot_publish_through_same_pointer_owner(self):
+    def test_native_qfq_diagnostic_snapshot_cannot_activate(self):
         import contextlib
         import io
         import shutil
@@ -171,12 +171,11 @@ class FourteenIntegration(unittest.TestCase):
             args.expected_active_bundle_sha = sha
             with patch.object(cli,'_load_market',return_value=({'SH:600000':self.raw},None,{'source_sha256':'f'*64})):
                 result = cli.build(args)
-            # Pure temporary-filesystem publication contract, not a production approval.
-            activate_batch(snapshots,Path(result['output']))
-            active = resolve_active_release(snapshots)
-            self.assertEqual(active['bundle_sha256'],sha)
-            self.assertEqual(active['release_id'],release_id)
-            self.assertEqual(Path(active['batch']), (snapshots/'current').resolve())
+            # STALE_TEST: limited diagnostic batches now explicitly cannot activate.
+            from app.strategy_integration.release_store import PublishError
+            with self.assertRaisesRegex(PublishError, 'DIAGNOSTIC_BATCH_CANNOT_ACTIVATE'):
+                activate_batch(snapshots,Path(result['output']))
+            self.assertIsNone(resolve_active_release(snapshots))
 
     def test_lab_golden_verifier_accepts_parity_and_rejects_changed_score(self):
         import shutil
@@ -223,7 +222,7 @@ class FourteenIntegration(unittest.TestCase):
         import io
         from types import SimpleNamespace
         from app.strategy_integration.partitioned_build import build
-        args = SimpleNamespace(as_of=str(self.raw.datetime.iloc[-1].date()), chart_bars=90)
+        args = SimpleNamespace(as_of=str(self.raw.datetime.iloc[-1].date()), chart_bars=90, max_symbols=2)
         runtime = self.bundle['fourteen_runtime']
         original = producer.make_snapshots
         calls = []
@@ -260,7 +259,7 @@ class FourteenIntegration(unittest.TestCase):
         from app.services.strategy_research_read_service import read_snapshot, evaluate
         from app.strategy_integration.partitioned_build import build
         from app.strategy_integration.release_store import _validate_batch_for_activation
-        args = SimpleNamespace(as_of=str(self.raw.datetime.iloc[-1].date()), chart_bars=120)
+        args = SimpleNamespace(as_of=str(self.raw.datetime.iloc[-1].date()), chart_bars=120, max_symbols=2)
         runtime = self.bundle['fourteen_runtime']
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()):
             frames = {'SH:600000': self.raw, 'SZ:000001': self.raw}

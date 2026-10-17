@@ -2,6 +2,7 @@
 import { apiClient } from './client'
 
 export interface ModelRelease {
+  batch_id?: string
   as_of?: string
   production_eligible?: boolean
   evaluation_sha256?: string
@@ -13,6 +14,7 @@ export interface ModelRelease {
   created_at: string | null
 }
 export interface ReleaseList {
+  installed_models?: Array<{status:string;version?:string;manifest_sha256?:string;model_count?:number;price_input_contract?:string;blockers:string[]}>
   status?: string
   active_release: { release_id: string; activated_at: string } | null
   releases: ModelRelease[]

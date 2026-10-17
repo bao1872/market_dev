@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import tempfile
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -26,6 +27,8 @@ _log = logging.getLogger(__name__)
 
 
 ACTIVE_RELEASE = 'active_release.json'
+# HTTP dependency sets this only after administrator authorization.
+preview_batch: ContextVar[Path | None] = ContextVar('strategy_preview_batch', default=None)
 
 
 class PublishError(RuntimeError):
@@ -188,6 +191,9 @@ def activate_batch(root: Path, batch: Path, *, bundle_sha256: str = '',
     root.mkdir(parents=True, exist_ok=True)
     with (root/'publication.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        checked = json.loads((batch/'manifest.json').read_text())
+        if checked.get('diagnostic_max_symbols'):
+            raise PublishError('DIAGNOSTIC_BATCH_CANNOT_ACTIVATE')
         if refresh_only:
             active = resolve_active_release(root)
             manifest = json.loads((batch/'manifest.json').read_text())
@@ -282,11 +288,40 @@ def _refresh_current_symlink(root: Path, batch: Path) -> None:
             tmp.unlink()
 
 
+def resolve_preview_batch(root: Path, batch_id: str) -> Path:
+    """No pointer write: locate an exact validated batch, never newest by model."""
+    import re
+    if not re.fullmatch(r'[0-9a-f]{64}', batch_id):
+        raise PublishError('INVALID_PREVIEW_BATCH_ID')
+    matches = []
+    for manifest in root.glob('*/manifest.json'):
+        batch = manifest.parent
+        if batch.is_symlink() or not batch.resolve().is_relative_to(root.resolve()):
+            continue
+        value = json.loads(manifest.read_text())
+        if value.get('batch_id') == batch_id:
+            if value.get('status') not in ('VALIDATED_STAGING_NOT_DEPLOYED', 'AUDITED'):
+                raise PublishError('PREVIEW_BATCH_NOT_VALIDATED')
+            for name, key in (('candidate_snapshot.json', 'candidate_sha256'),
+                              ('evaluation_snapshot.json', 'evaluation_sha256')):
+                if (batch/name).is_symlink() or digest_path(batch/name) != value.get(key):
+                    raise PublishError('PREVIEW_BATCH_HASH_MISMATCH')
+            matches.append(batch)
+    if len(matches) != 1:
+        raise PublishError('PREVIEW_BATCH_NOT_UNIQUE')
+    return matches[0]
+
+
 def published_snapshot_path(name: str, fallback: str) -> Path:
     """Readers consume the same authoritative pointer as prediction jobs.
 
     An invalid active pointer is an error, never a fallback to old demo assets.
     """
+    preview = preview_batch.get()
+    if preview is not None:
+        if name not in ('candidate_snapshot.json', 'evaluation_snapshot.json'):
+            raise PublishError('INVALID_PREVIEW_ARTIFACT')
+        return preview/name
     root = os.getenv('PANJI_STRATEGY_RELEASE_ROOT', '')
     if root:
         base = Path(root).resolve()

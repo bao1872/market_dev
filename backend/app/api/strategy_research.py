@@ -4,6 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.services.access_control_service import AccessContext, require_capability
+from app.services.strategy_preview import select_preview
 from app.services.strategy_research_read_service import (
     SnapshotInvalid,
     SnapshotUnavailable,
@@ -11,7 +12,7 @@ from app.services.strategy_research_read_service import (
     read_snapshot,
 )
 
-router = APIRouter(prefix="/v1/strategy-research", tags=["strategy-research"])
+router = APIRouter(dependencies=[Depends(select_preview)], prefix="/v1/strategy-research", tags=["strategy-research"])
 
 
 def _market_access(_: AccessContext = Depends(require_capability("strategy_research"))) -> None:
@@ -48,7 +49,7 @@ def zigzag_evaluation(
 @router.get("/zigzag/task-performance")
 def task_performance(
     symbol: str | None = Query(None, pattern=r"^(SH|SZ|BJ):[0-9]{6}$"),
-    period: str = Query("TEST", pattern="^(TRAIN|VAL|TEST|UNASSIGNED|ALL)$"),
+    period: str = Query("TEST", pattern="^(TRAIN|VAL|TEST|POST_TEST|UNASSIGNED|ALL)$"),
     release_id: str | None = Query(None, min_length=1, max_length=128),
     _: None = Depends(_market_access),
 ) -> dict:

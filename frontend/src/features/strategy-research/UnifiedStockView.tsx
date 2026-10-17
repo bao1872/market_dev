@@ -1,3 +1,4 @@
+import { strategyPreviewKey } from '@/api/strategyPreview'
 import { useQuery } from '@tanstack/react-query'
 import { getStockResearch, getStrategyHistory } from '@/api/strategyCandidates'
 import CandidateScoreChart from './CandidateScoreChart'
@@ -12,9 +13,9 @@ export default function UnifiedStockView({urlSymbol, focusedId, stage, releaseId
   urlSymbol: string; focusedId: string | null; stage: string; releaseId: string | null;
   observationId: string | null; decisionDate: string | null; onLocation: StockLocation
 }) {
-  const stock = useQuery({queryKey: ['strategy-research','stock',urlSymbol,releaseId],
+  const stock = useQuery({queryKey: [strategyPreviewKey(), 'strategy-research','stock',urlSymbol,releaseId],
     queryFn: () => getStockResearch(urlSymbol, releaseId ?? undefined), enabled: isSymbol(urlSymbol), staleTime: 120000, retry: false})
-  const history = useQuery({queryKey: ['strategy-research','bars',urlSymbol,500],
+  const history = useQuery({queryKey: [strategyPreviewKey(), 'strategy-research','bars',urlSymbol,500],
     queryFn: () => getStrategyHistory(urlSymbol,500), enabled: isSymbol(urlSymbol), staleTime: 120000, retry: false})
   const data = stock.data
   const selected = data?.candidates.find(c => c.candidate_id === focusedId)

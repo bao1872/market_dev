@@ -93,7 +93,7 @@ def validate_delivery(root: Path, pinned_sha: str):
     if (delivery.get('schema') != 'PANJI_LAB_DELIVERY_V1'
             or delivery.get('manifest_sha256') != sha
             or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', delivery.get('lab_revision', ''))
-            or delivery.get('approved_for_production') is not True):
+            or not isinstance(delivery.get('approved_for_production'), bool)):
         raise ValueError('LAB_APPROVAL_IDENTITY_REQUIRED')
     for name in ('validation_report.json', 'golden_cases.json'):
         if hashlib.sha256((root/name).read_bytes()).hexdigest() != delivery.get('files', {}).get(name):

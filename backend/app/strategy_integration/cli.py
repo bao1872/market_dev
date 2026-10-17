@@ -154,7 +154,8 @@ def build(args):
         from .job_progress import progress
         progress('VERIFY_LAB_GOLDEN', 0, 1)
         facts['lab_delivery'] = {**verify_golden(Path(bundle_path), delivery_id),
-                                 'lab_revision': approval['lab_revision']}
+                                 'lab_revision': approval['lab_revision'],
+                                 'approved_for_production':approval['approved_for_production']}
         progress('VERIFY_LAB_GOLDEN', 1, 1)
         bundle_origin = 'PANJI_LAB_DELIVERY'
     if 'fourteen_runtime' not in bundle:

@@ -1,3 +1,4 @@
+import { strategyPreviewKey } from '../../api/strategyPreview'
 /** A historical record is navigable only with a complete event identity. */
 export interface CandidateLinkIdentity {
   symbol: string
@@ -18,5 +19,7 @@ export function buildCandidateDeepLink(row: CandidateLinkIdentity): string | nul
     observation_id: row.observation_id, stage: row.stage,
     decision_date: row.decision_date!, release_id: row.model_release_id,
   })
+  const preview = strategyPreviewKey()
+  if (preview) query.set('preview_batch', preview)
   return `/strategy?${query.toString()}`
 }

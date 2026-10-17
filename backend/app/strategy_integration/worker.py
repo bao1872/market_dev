@@ -191,6 +191,11 @@ def process_one() -> dict:
                     cmd += ['--candidate-bundle', str(package), '--candidate-sha', sha]
                     if payload.get('delivery_id'):
                         cmd += ['--lab-delivery-id', sha]
+                    diagnostic = payload.get('diagnostic_max_symbols', 0)
+                    if not isinstance(diagnostic, int) or isinstance(diagnostic, bool) or not 0 <= diagnostic <= 20:
+                        raise RuntimeError('INVALID_DIAGNOSTIC_SYMBOL_LIMIT')
+                    if diagnostic:
+                        cmd += ['--max-symbols', str(diagnostic)]
                 elif kind == 'TRAIN':
                     raise RuntimeError('TRAINING_MOVED_TO_PANJI_LAB')
                 else:

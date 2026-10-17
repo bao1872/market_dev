@@ -173,7 +173,7 @@ def model_releases(ctx:AccessContext=Depends(require_admin)) -> dict:
         if m.get('bundle_origin') != 'PANJI_LAB_DELIVERY' and m.get('status') != 'AUDITED':
             continue
         if SHA_RE.fullmatch(m.get('release_id', '')) and m['release_id'] not in seen:
-            records.append({**{k:m.get(k) for k in ('release_id','label_contract','status','as_of','evaluation_sha256','validation')},
+            records.append({**{k:m.get(k) for k in ('release_id','label_contract','status','as_of','evaluation_sha256','validation','batch_id')},
                             'bundle_sha256':m.get('runtime', {}).get('bundle_sha256')})
             from app.strategy_integration.fourteen_adapter import verify_production_package
             try:
@@ -184,8 +184,18 @@ def model_releases(ctx:AccessContext=Depends(require_admin)) -> dict:
             seen.add(m['release_id'])
             if len(records) >= 20:
                 break
+    from app.strategy_integration.fourteen_adapter import PACKAGE, verify_package
+    installed = []
+    try:
+        model_manifest, model_sha = verify_package(PACKAGE)
+        installed.append({'version':model_manifest['version'], 'manifest_sha256':model_sha,
+            'model_count':len(model_manifest['models']), 'status':'INSTALLED',
+            'price_input_contract':model_manifest.get('price_input_contract'),
+            'blockers':[] if model_manifest.get('price_input_contract') == 'QFQ_ASOF_V1' else ['PRODUCTION_PRICE_CONTRACT_REQUIRED']})
+    except (ValueError, OSError, KeyError) as exc:
+        installed.append({'status':'INVALID', 'blockers':[str(exc)[:200]]})
     active=root/'active_release.json'
-    return {'releases':records,'active_release':json.loads(active.read_text()) if active.is_file() else None}
+    return {'installed_models':installed,'releases':records,'active_release':json.loads(active.read_text()) if active.is_file() else None}
 
 
 @router.get('/model-releases/personal/{symbol}')
@@ -319,6 +329,8 @@ def audit_release(release_id: str, request: PublishRequest, ctx:AccessContext=De
     proof = manifest.get('runtime', {}).get('lab_delivery', {})
     if (manifest.get('evaluation_protocol') != EVALUATION_PROTOCOL
             or proof.get('status') != 'GOLDEN_VERIFIED'
+            or proof.get('approved_for_production') is not True
+            or manifest.get('diagnostic_max_symbols', 0) != 0
             or proof.get('manifest_sha256') != manifest.get('runtime', {}).get('bundle_sha256')):
         raise HTTPException(status_code=409, detail='须先完成 lab 正式交付、黄金样例对账与独立成熟评价')
     if digest_path(batch/'evaluation_snapshot.json') != request.candidate_report_sha256:

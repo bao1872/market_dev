@@ -157,3 +157,34 @@ BUILD_TRAINING_DATA 739/5265，峰值 RSS 883.5 MiB；容器约 913.1 MiB/3 GiB�
 
 交付接口的当前实现细节见 `strategy-lab-delivery-contract.md`。本文没有修改 PRD 或治理文件，
 没有授权新增远程部署、迁移或业务数据写入。
+
+
+## 2026-10-17 22:34 CST 远程执行更新
+
+用户明确要求结束旧流程、使用 lab 已训练模型并部署新功能。本次精确终止 TRAIN
+`5e5a2d6e3dca482e9c57374e8fdceef4` 的训练子进程，原 worker 记录 FAILED /
+PROCESS_EXIT_-15（用户终止，不是计算自行失败），最后进度 1398/5265。保留任务/输出/日志，
+暂停原自动跟进，没有创建旧协议评价或重试。
+
+已通过登记部署入口部署 `094983cd6929348f08c812ff027d8c187c60c409`，
+部署日志 `/tmp/panji-strategy-deploy-094983cd.log`。source-only Live Refresh，未构建环境镜像、
+未迁移数据库；登记部署器完成受影响 Python 服务刷新与原盘后 worker 恢复，
+repo/RUNTIME_SHA/version 身份一致，健康及资源复检通过，前端产物身份通过部署器核验。
+
+本轮重新执行59项后端纯测试、6项前端合同测试、10项实际原生权重 unittest 均通过，
+前端 TypeScript/Vite 构建通过。额外22项旧适配 pytest 尝试不能记为通过：最初缺
+PANJI_STRATEGY_MODEL_ASSETS，补充路径后 backend venv 缺 lightgbm；lab venv 又缺
+pytest_asyncio。分类为运行测试环境缺依赖，未修改生产或放宽测试；原生权重由上述
+独立 unittest 实际验证。
+
+模型包已随版本化代码存在于远程，版本 `fourteen-models-v1-20261016`，14个模型，
+manifest SHA256 `a5ce31ba4adb883b0fc3570d02ebcb08da594f3d5ecd958299d327610866b11e`；
+与本地 lab integration 包 manifest 和20个声明文件逐字节相同，远程 verify_package 通过。
+生产 verify_production_package 实际拒绝 `PRODUCTION_PRICE_CONTRACT_REQUIRED`。
+lab 的 data/raw/1d 及研究说明记录未复权，不能未经验证声明为 QFQ_ASOF_V1，
+新交付证据亦未齐全。没有伪造批准、黄金样例或复权声明。
+
+远程 runtime AVAILABLE、can_train=false、can_validate_delivery=true、can_predict=false，
+active_release_id=null；盘后 owner 为 NOT_READY / APPROVED_MODEL_OR_RUNTIME_REQUIRED。
+因此新功能部署完成，模型生产预测及新协议全市场闭环仍被真实价格合同/交付证据阻断，
+尚未激活，不能宣称整条业务闭环跑通。

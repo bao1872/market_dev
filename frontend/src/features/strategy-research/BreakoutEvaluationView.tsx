@@ -1,3 +1,4 @@
+import { strategyPreviewKey } from '@/api/strategyPreview'
 import {useState} from 'react'
 import {useQuery} from '@tanstack/react-query'
 import {getZigzagEvaluation, type StrategySide} from '@/api/strategyResearch'
@@ -8,7 +9,7 @@ import {Link} from 'react-router-dom'
 
 export default function BreakoutEvaluationView({symbol,releaseId,gain,risk,period='ALL'}:{symbol?:string;releaseId?:string;gain:number;risk:number;period?:string}) {
   const [side,setSide]=useState<StrategySide>('BUY'), [trend,setTrend]=useState('ALL')
-  const q=useQuery({queryKey:['strategy-breakouts',symbol,releaseId,period,side,trend,gain,risk],
+  const q=useQuery({queryKey: [strategyPreviewKey(), 'strategy-breakouts',symbol,releaseId,period,side,trend,gain,risk],
     queryFn:()=>getZigzagEvaluation({symbol,release_id:releaseId,period,side,family:'BREAKOUT',trend:trend==='ALL'?undefined:trend,gain_pct:gain,risk_pct:risk}),retry:false,staleTime:120000})
   return <section className="panel breakout-evaluation" aria-label="已发生突破专项评价">
     <div className="panel-head"><div><h2>03 / D1–D3 已发生突破 · 后续表现</h2><div className="hint">首次突破独立收录，不要求 L1/L2 超阈值；按突破时可知的走势归组，D2/D3 跟踪不重复计数。</div></div></div>

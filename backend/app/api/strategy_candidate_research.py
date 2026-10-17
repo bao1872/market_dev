@@ -1,24 +1,37 @@
 """Strategy read endpoints — per-request entitlement, no background inference."""
 from __future__ import annotations
+
 import math
 import re
 import unicodedata
-import pandas as pd
-from datetime import date, datetime, timedelta, time
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.deps import get_db
 from app.models.instrument import Instrument
-from app.services.instrument_maintenance_service import stock_symbol_sql_filter
-from app.services.market_data_aggregation_service import MarketDataAggregationService, MarketDataSourcePolicy
-from app.services.calendar_service import get_most_recent_trading_day_async
 from app.services.access_control_service import AccessContext, require_capability
-from app.services.strategy_candidate_snapshot import DatasetInvalid, DatasetUnavailable, get_stock, get_today, read_dataset
+from app.services.calendar_service import get_most_recent_trading_day_async
+from app.services.instrument_maintenance_service import stock_symbol_sql_filter
+from app.services.market_data_aggregation_service import (
+    MarketDataAggregationService,
+    MarketDataSourcePolicy,
+)
+from app.services.strategy_candidate_snapshot import (
+    DatasetInvalid,
+    DatasetUnavailable,
+    get_stock,
+    get_today,
+    read_dataset,
+)
+from app.services.strategy_preview import select_preview
 from app.services.strategy_structure_view import StructureUnavailable, structure_from_verified_bars
 
-router = APIRouter(prefix="/v1/strategy-research", tags=["strategy-research-candidates"])
+router = APIRouter(dependencies=[Depends(select_preview)], prefix="/v1/strategy-research", tags=["strategy-research-candidates"])
 
 
 def _visible(_: AccessContext = Depends(require_capability("strategy_research"))) -> None:
@@ -136,7 +149,12 @@ async def strategy_stock_search(
         .limit(12)
     )
     result = await db.execute(stmt)
-    allowed = set(_dataset()["stocks"])
+    try:
+        allowed = set(_dataset()["stocks"])
+    except HTTPException as exc:
+        if exc.status_code != 503 or not isinstance(exc.__cause__, DatasetUnavailable):
+            raise
+        allowed = set()
     items = []
     for row in result.scalars().all():
         try:

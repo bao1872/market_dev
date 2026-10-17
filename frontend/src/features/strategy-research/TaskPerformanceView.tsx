@@ -1,3 +1,4 @@
+import { strategyPreviewKey } from '@/api/strategyPreview'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getTaskPerformance } from '@/api/strategyResearch'
@@ -9,13 +10,13 @@ export default function TaskPerformanceView({ symbol, releaseId }: {symbol?: str
   const [kind, setKind] = useState('L')
   const [direction, setDirection] = useState('向上')
   const [stage, setStage] = useState('ALL')
-  const query = useQuery({queryKey: ['strategy-task-performance', symbol, releaseId, period],
+  const query = useQuery({queryKey: [strategyPreviewKey(), 'strategy-task-performance', symbol, releaseId, period],
     queryFn: () => getTaskPerformance({symbol, release_id: releaseId, period}), retry: false, staleTime: 120000})
   const rows = (family === 'TREND' ? query.data?.trend.tasks : query.data?.tasks)?.filter(t => (family === 'TREND' ? t.direction === direction : t.layer === family && t.kind === kind) && (stage === 'ALL' || t.stage === stage)) ?? []
   return <section className="panel task-performance" aria-label={symbol ? '个股分任务性能评价' : '全市场分任务性能评价'}>
     <div className="panel-head"><div><h2>01 / 分任务识别能力{symbol ? ` · ${symbol}` : ' · 全市场'}</h2><div className="hint">完整适用候选池 · 固定模型阈值 · 按任务和阶段独立评价</div></div>
       <label>样本范围 <select className="select" aria-label="任务评价样本范围" value={period} onChange={e => setPeriod(e.target.value)}>
-        <option value="TEST">独立测试 TEST</option><option value="VAL">验证 VAL</option><option value="UNASSIGNED">未标注切割</option><option value="ALL">全部已发布样本</option></select></label></div>
+        <option value="TEST">独立测试 TEST</option><option value="POST_TEST">测试后观察 POST_TEST</option><option value="VAL">验证 VAL</option><option value="UNASSIGNED">未标注切割</option><option value="ALL">全部已发布样本</option></select></label></div>
     <div className="panel-body"><div className="control-row">
       {([['L1','高低点确认 L1'],['L2','突破确认 L2'],['D0','当日极值 D0'],['TREND','趋势确认']] as const).map(([id,label]) =>
         <button type="button" key={id} className={`btn ${family === id ? 'primary' : ''}`} aria-pressed={family === id} onClick={() => {setFamily(id);setStage('ALL')}}>{label}</button>)}
